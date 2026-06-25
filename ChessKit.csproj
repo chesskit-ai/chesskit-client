@@ -1,0 +1,122 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.17763.0</TargetFramework>
+    <Configurations>Debug;Release</Configurations>
+    <Platforms>AnyCPU;x64</Platforms>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+	<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <RootNamespace>ChessKit</RootNamespace>
+    <AssemblyName>ChessKit</AssemblyName>
+    <Product>Chess Kit</Product>
+    <Company>Chess Kit</Company>
+    <Description>Chess Kit</Description>
+    <Version>1.1.0</Version>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <FileVersion>1.1.0.0</FileVersion>
+    <InformationalVersion>1.1.0</InformationalVersion>
+    <ApplicationIcon>Assets\Brand\chess-kit-icon.ico</ApplicationIcon>
+	<OutputType Condition="'$(Configuration)' == 'Debug'">Exe</OutputType>
+    <OutputType Condition="'$(Configuration)' == 'Release'">WinExe</OutputType>
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\lichess_openings\*.tsv" />
+    <EmbeddedResource Include="Assets\AnalysisBoardPieces\*.png" />
+    <EmbeddedResource Include="Assets\Brand\chess-kit-icon.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Assets\Brand\chess-kit-icon.png" />
+    <None Include="Assets\Brand\chess-kit-icon-source.png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="engines\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </None>
+  </ItemGroup>
+
+  <Target Name="RemoveRootLc0WhenBundledLc0Exists" AfterTargets="Build;Publish">
+    <Delete Files="$(TargetDir)engines\lc0.exe"
+            Condition="Exists('$(TargetDir)engines\lc0.exe') and Exists('$(TargetDir)engines\lc0\lc0.exe')" />
+    <Delete Files="$(PublishDir)engines\lc0.exe"
+            Condition="'$(PublishDir)' != '' and Exists('$(PublishDir)engines\lc0.exe') and Exists('$(PublishDir)engines\lc0\lc0.exe')" />
+  </Target>
+
+  <Target Name="CopyWindowsNativeDependenciesToRoot" AfterTargets="Build;Publish">
+    <ItemGroup>
+      <WindowsNativeDependency Include="$(TargetDir)runtimes\win-x64\native\*.dll" />
+      <WindowsNativeDependency Include="$(PublishDir)runtimes\win-x64\native\*.dll" Condition="'$(PublishDir)' != ''" />
+    </ItemGroup>
+
+    <Copy SourceFiles="@(WindowsNativeDependency)"
+          DestinationFolder="$(TargetDir)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(TargetDir)runtimes\win-x64\native')" />
+
+    <Copy SourceFiles="@(WindowsNativeDependency)"
+          DestinationFolder="$(PublishDir)"
+          SkipUnchangedFiles="true"
+          Condition="'$(PublishDir)' != '' and Exists('$(PublishDir)runtimes\win-x64\native')" />
+  </Target>
+
+  <Target Name="RemoveNativeDebugArtifacts" AfterTargets="Build;Publish">
+    <ItemGroup>
+      <NativeDebugArtifact Include="$(TargetDir)DirectML.Debug.dll" />
+      <NativeDebugArtifact Include="$(TargetDir)DirectML.Debug.pdb" />
+      <NativeDebugArtifact Include="$(TargetDir)DirectML.pdb" />
+      <NativeDebugArtifact Include="$(PublishDir)DirectML.Debug.dll" Condition="'$(PublishDir)' != ''" />
+      <NativeDebugArtifact Include="$(PublishDir)DirectML.Debug.pdb" Condition="'$(PublishDir)' != ''" />
+      <NativeDebugArtifact Include="$(PublishDir)DirectML.pdb" Condition="'$(PublishDir)' != ''" />
+    </ItemGroup>
+
+    <Delete Files="@(NativeDebugArtifact)" />
+  </Target>
+
+  <Target Name="CopyDebugHumanUciEngine" AfterTargets="Build" Condition="'$(Configuration)' == 'Debug'">
+    <PropertyGroup>
+      <HumanUciEngineDebugDir>$(MSBuildProjectDirectory)\..\..\uci-engine\src\HumanUciEngine\bin\Debug\net10.0</HumanUciEngineDebugDir>
+    </PropertyGroup>
+
+    <ItemGroup Condition="Exists('$(HumanUciEngineDebugDir)\HumanUciEngine.exe')">
+      <DebugHumanUciEngineFiles Include="$(HumanUciEngineDebugDir)\**\*" />
+    </ItemGroup>
+
+    <Copy SourceFiles="@(DebugHumanUciEngineFiles)"
+          DestinationFiles="@(DebugHumanUciEngineFiles->'$(TargetDir)engines\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true"
+          Condition="'@(DebugHumanUciEngineFiles)' != ''" />
+  </Target>
+
+  <ItemGroup>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Gera.Chess" Version="1.2.0" />
+    <PackageReference Include="OpenCvSharp4" Version="4.13.0.20260427" />
+    <PackageReference Include="OpenCvSharp4.Extensions" Version="4.13.0.20260427" />
+    <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.13.0.20260302" />
+    <PackageReference Include="SharpDX" Version="4.2.0" />
+    <PackageReference Include="SharpDX.Direct3D11" Version="4.2.0" />
+    <PackageReference Include="SharpDX.DXGI" Version="4.2.0" />
+    <PackageReference Include="System.Management" Version="10.0.8" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="Assets\" />
+  </ItemGroup>
+
+</Project>

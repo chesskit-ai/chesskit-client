@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <circle cx="512" cy="512" r="382" fill="#4e4e58" fill-opacity="0.82"/>
+  <circle cx="512" cy="512" r="330" fill="none"/>
+  <path d="M173 688 A382 382 0 0 1 715 173" fill="none" stroke="#eeeef0" stroke-width="31" stroke-linecap="round"/>
+  <path d="M816 315 A382 382 0 0 1 878 697" fill="none" stroke="#9b9ba4" stroke-width="23" stroke-linecap="round"/>
+  <path d="M783 205 A382 382 0 0 1 849 331" fill="none" stroke="#9b9ba4" stroke-width="23" stroke-linecap="round"/>
+  <path d="M789 123 A382 382 0 0 1 379 151" fill="none" stroke="#eeeef0" stroke-width="31" stroke-linecap="round"/>
+  <text x="512" y="675" text-anchor="middle" font-family="Segoe UI Symbol, Arial Unicode MS, sans-serif" font-size="500" fill="#f5f5f5">&#9822;</text>
+</svg>
