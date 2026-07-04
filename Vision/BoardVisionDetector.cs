@@ -110,6 +110,9 @@ namespace ChessKit
         private const int BoardDetectionMinIntervalMs = 20000;
         private const int NetworkMetricsWindowSeconds = 10;
         private const int NetworkMetricsMaxSamples = 120;
+        // Short window for the user-facing roundtrip rate ("FPS" in the toolbar/HUD):
+        // long enough to smooth bursts, short enough to read 0 within ~3s of idle.
+        private const int VisionRoundtripRateWindowSeconds = 3;
         private static readonly bool UseVisionStream = true;
         private static readonly bool UseVisionTcpStream = true;
         private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMilliseconds(RemoteVisionTimeoutMs) };
@@ -225,6 +228,28 @@ namespace ChessKit
                 LastBoardDetectionUploadUtc = now;
                 remainingCooldownMs = 0;
                 return true;
+            }
+        }
+
+        // Actual vision roundtrips per second - counts real uploads to the server
+        // (each RecordNetworkPacket call), not capture-loop passes. Idle boards
+        // send nothing, so this reads 0 within VisionRoundtripRateWindowSeconds
+        // of the last upload; the old capture-loop FPS sat at ~60 while idle.
+        public static double GetVisionRoundtripsPerSecond()
+        {
+            lock (NetworkMetricsLock)
+            {
+                DateTimeOffset now = DateTimeOffset.UtcNow;
+                PruneNetworkMetrics(now);
+                DateTimeOffset cutoff = now.AddSeconds(-VisionRoundtripRateWindowSeconds);
+                int recent = 0;
+                foreach (NetworkMetricSample sample in NetworkMetricSamples)
+                {
+                    if (sample.TimestampUtc >= cutoff)
+                        recent++;
+                }
+
+                return recent / (double)VisionRoundtripRateWindowSeconds;
             }
         }
 
@@ -850,26 +875,55 @@ namespace ChessKit
 
         private static string ReceiveVisionStreamText(ClientWebSocket socket, CancellationToken cancellationToken)
         {
-            using var ms = new MemoryStream();
-            byte[] buffer = new byte[WebSocketReceiveBufferSize];
-            WebSocketReceiveResult result;
-            do
+            // Rent the receive buffer instead of allocating a fresh 1MB array per
+            // response. A new byte[1MB] every vision reply lands on the Large Object
+            // Heap and, at active-play request rates, forces periodic gen2/LOH GCs
+            // that show up as multi-ms overlay stutters. The pool reuses one buffer.
+            byte[] buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(WebSocketReceiveBufferSize);
+            try
             {
-                result = socket.ReceiveAsync(buffer, cancellationToken).GetAwaiter().GetResult();
+                WebSocketReceiveResult result = socket.ReceiveAsync(buffer, cancellationToken).GetAwaiter().GetResult();
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
                     DisposeVisionSocket();
                     SetConnectionState(BoardVisionConnectionState.Disconnected);
                     throw new IOException("vision stream closed");
                 }
+
+                // Fast path: the whole (small JSON) response arrives in one fragment,
+                // so decode straight from the buffer with no MemoryStream/ToArray copy.
+                if (result.EndOfMessage)
+                {
+                    if (result.MessageType != WebSocketMessageType.Text)
+                        throw new IOException("vision stream returned a non-text response");
+                    return System.Text.Encoding.UTF8.GetString(buffer, 0, result.Count);
+                }
+
+                // Rare multi-fragment path: accumulate, still reusing the pooled buffer.
+                using var ms = new MemoryStream();
                 ms.Write(buffer, 0, result.Count);
+                do
+                {
+                    result = socket.ReceiveAsync(buffer, cancellationToken).GetAwaiter().GetResult();
+                    if (result.MessageType == WebSocketMessageType.Close)
+                    {
+                        DisposeVisionSocket();
+                        SetConnectionState(BoardVisionConnectionState.Disconnected);
+                        throw new IOException("vision stream closed");
+                    }
+                    ms.Write(buffer, 0, result.Count);
+                }
+                while (!result.EndOfMessage);
+
+                if (result.MessageType != WebSocketMessageType.Text)
+                    throw new IOException("vision stream returned a non-text response");
+
+                return System.Text.Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
             }
-            while (!result.EndOfMessage);
-
-            if (result.MessageType != WebSocketMessageType.Text)
-                throw new IOException("vision stream returned a non-text response");
-
-            return System.Text.Encoding.UTF8.GetString(ms.ToArray());
+            finally
+            {
+                System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
+            }
         }
 
         private static VisionStreamPayload BuildVisionStreamPayload(RemoteVisionRequest request, Mat image, int jpegQuality, bool allowDelta)

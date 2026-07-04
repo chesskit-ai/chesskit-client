@@ -103,6 +103,100 @@ partial class Program
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool DestroyIcon(IntPtr hIcon);
 
+    [DllImport("winmm.dll", EntryPoint = "timeBeginPeriod")]
+    private static extern uint TimeBeginPeriod(uint uMilliseconds);
+
+    [DllImport("winmm.dll", EntryPoint = "timeEndPeriod")]
+    private static extern uint TimeEndPeriod(uint uMilliseconds);
+
+    private static bool _highResTimerActive;
+
+    // Raise the OS scheduler/timer resolution to 1ms for the process lifetime.
+    // The 60fps tracking loop paces itself with Task.Delay(16 - frameTime); at the
+    // default ~15.6ms timer quantum that sleep overshoots to 15-31ms, dropping the
+    // real cadence to ~30-40fps and adding 10-25ms of scheduling jitter before a
+    // move is even sampled. 1ms resolution lets the pacing sleep honor its target
+    // so the first frame of a move is captured promptly. Reverted on shutdown
+    // (Windows also auto-restores on process exit, so this is best-effort hygiene).
+    internal static void EnableHighResolutionTimer()
+    {
+        if (_highResTimerActive) return;
+        try
+        {
+            if (TimeBeginPeriod(1) == 0) // TIMERR_NOERROR
+            {
+                _highResTimerActive = true;
+            }
+        }
+        catch { /* winmm unavailable - fall back to default resolution */ }
+    }
+
+    internal static void DisableHighResolutionTimer()
+    {
+        if (!_highResTimerActive) return;
+        try { TimeEndPeriod(1); } catch { }
+        _highResTimerActive = false;
+    }
+
+    /// <summary>
+    /// Injected into the LicenseEnforcer: shown ONLY when the servers are
+    /// unreachable during the startup license check (a NetworkError), so a paying
+    /// user is never silently dropped to Free over a transient outage. Runs the
+    /// modal on the overlay's pumped STA UI thread (the same pattern
+    /// RunStartupFlow uses for the terms/welcome dialogs) and returns the choice.
+    /// Fails safe to ContinueFree if the dialog can't be shown.
+    /// </summary>
+    private static LicenseUnreachableChoice PromptLicenseServerUnreachable(LicenseValidationResult result)
+    {
+        LicenseUnreachableChoice choice = LicenseUnreachableChoice.ContinueFree;
+
+        void ShowIt()
+        {
+            try
+            {
+                // Tuck the splash away so the modal owns the screen; restore it only
+                // if the user is retrying (otherwise the normal flow continues or
+                // aborts and disposes it). The splash is Release-only.
+#if !DEBUG
+                try { _startupStatusForm?.Hide(); } catch { }
+#endif
+
+                string hwid = string.IsNullOrWhiteSpace(result.HardwareId)
+                    ? HardwareIdentity.GetHardwareId()
+                    : result.HardwareId;
+
+                choice = ServerUnreachableDialog.Show(hwid, result.Message, TryCopyTextToClipboard);
+
+                if (choice == LicenseUnreachableChoice.Retry)
+                {
+#if !DEBUG
+                    try { _startupStatusForm?.Show(); _startupStatusForm?.BringToFront(); } catch { }
+#endif
+                }
+            }
+            catch
+            {
+                // Never let a dialog failure block startup forever.
+                choice = LicenseUnreachableChoice.ContinueFree;
+            }
+        }
+
+        try
+        {
+            Control? overlay = _overlay;
+            if (overlay != null && !overlay.IsDisposed && overlay.IsHandleCreated && overlay.InvokeRequired)
+                overlay.Invoke(new Action(ShowIt));
+            else
+                ShowIt();
+        }
+        catch
+        {
+            choice = LicenseUnreachableChoice.ContinueFree;
+        }
+
+        return choice;
+    }
+
     private static async Task TryRestartEngine()
     {
         try

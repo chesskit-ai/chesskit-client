@@ -340,6 +340,16 @@ namespace ChessKit
             if (!Visible) return;
 
             var transition = ApplyBoardScreenRect(boardScreen);
+
+            // Static board + unchanged surface = the pixels are identical, so this
+            // per-frame position update has nothing to repaint. Skipping the
+            // Invalidate here removes a full ~60Hz GDI+ arrow repaint of the board
+            // region whenever a board is being tracked but hasn't moved. Arrow/
+            // watermark CONTENT changes invalidate through their own paths
+            // (ShowMoveArrows / ShowFreeWatermark), so they are unaffected.
+            if (!transition.SurfaceChanged && transition.OldBoard == transition.NewBoard)
+                return;
+
             InvalidateBoardTransition(transition.OldBoard, transition.NewBoard, transition.SurfaceChanged);
         }
 

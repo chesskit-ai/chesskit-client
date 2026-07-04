@@ -38,6 +38,12 @@ partial class Program
 #else
             InitializeReleaseRuntimeLog();
 #endif
+            // Raise the OS timer resolution to 1ms so the tracking loop's frame
+            // pacing (Task.Delay) is not quantized to the ~15.6ms default, which
+            // otherwise halves the effective capture cadence and adds jitter to
+            // move->arrow latency. Reverted in the shutdown path below.
+            EnableHighResolutionTimer();
+
             // Enable per-monitor DPI awareness
             try { Application.SetHighDpiMode(HighDpiMode.PerMonitorV2); } catch { }
 
@@ -81,7 +87,8 @@ partial class Program
                 closeStartupStatus: CloseStartupStatus,
                 getOverlay: () => _overlay,
                 invalidateRuntimeState: InvalidateFullVersionLicenseRuntimeState,
-                exchangeFailureNoticeShown: () => Interlocked.Exchange(ref _licenseFailureNoticeShown, 1));
+                exchangeFailureNoticeShown: () => Interlocked.Exchange(ref _licenseFailureNoticeShown, 1),
+                promptServerUnreachable: PromptLicenseServerUnreachable);
 
             // Wire the runtime edition gate to the sticky "license verified" flag.
             // Until EnforceAsync runs (or in a Debug forced-Free override) this
@@ -187,12 +194,20 @@ partial class Program
             // the BuildLimits debug override (SetDebugFreeEditionOverride, set from args above).
             ShowStartupStatus(BuildLimits.IsFreeEdition ? "Preparing Chess Kit (Free)..." : "Preparing Chess Kit debug build...", 24);
 #else
-            // Single runtime-gated build: verify the license but NEVER abort startup.
-            // EnforceAsync latches Licensed if a valid license is found and otherwise
-            // continues as the limited Free Edition (no blocking dialog). The
-            // background monitor it starts can still upgrade Free -> Licensed later.
+            // Single runtime-gated build: verify the license. EnforceAsync latches
+            // Licensed if a valid license is found, and otherwise continues as the
+            // limited Free Edition. The one case it can BLOCK is when the servers are
+            // unreachable: rather than silently drop a paying user to Free (which
+            // looks like a revoked license), it shows a modal offering Try again /
+            // Continue in Free / Exit. Only "Exit" returns false -> abort startup.
+            // The background monitor it starts can still upgrade Free -> Licensed later.
             ShowStartupStatus("Checking Chess Kit license...", 18, indeterminate: true);
-            await _licenseEnforcer!.EnforceAsync();
+            if (!await _licenseEnforcer!.EnforceAsync())
+            {
+                // User chose to exit at the "servers unreachable" prompt.
+                CloseUiThreadAfterStartupCancel();
+                return;
+            }
             UpdateStartupStatus(BuildLimits.IsFreeEdition ? "Starting Free Edition..." : "License verified.", 32);
             await Task.Delay(120);
 #endif
@@ -1879,6 +1894,7 @@ partial class Program
             }
 
             // Cleanup
+            DisableHighResolutionTimer();
             DisposeAllEngines();
             _detector?.Dispose();
             ResetConfirmedBoardSnapshot();

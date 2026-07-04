@@ -281,11 +281,16 @@ partial class Program
         {
             if (_isTracking)
             {
-                _currentFps = _frameCount / elapsed;
+                // Displayed "FPS" = actual vision roundtrips/s (data really sent to
+                // the server), not capture-loop passes - the loop spins at ~60 even
+                // when the board is unchanged and nothing is uploaded, which made
+                // the HUD read 60 while idle. Capture rate stays in the log below.
+                _currentFps = BoardVisionDetector.GetVisionRoundtripsPerSecond();
                 _currentFenPerSec = _fenCount / elapsed;
 
+                double captureFps = _frameCount / elapsed;
                 Log($"[METRICS] Frames: {_frameCount}, FENs: {_fenCount}, Elapsed: {elapsed:F2}s");
-                Log($"[METRICS] FPS: {_currentFps:F1}, FEN/s: {_currentFenPerSec:F1}");
+                Log($"[METRICS] Vision RT/s: {_currentFps:F1}, CaptureFps: {captureFps:F1}, FEN/s: {_currentFenPerSec:F1}");
             }
             else
             {

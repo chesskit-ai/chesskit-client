@@ -465,20 +465,21 @@ namespace ChessKit
             return $"{(_isFreeLimited ? 1 : 0)}|{chip}|{engineLabel}";
         }
 
-        // Map round-trip latency (ms) to a 0..4 cellphone-style signal level.
+        // Map round-trip latency (ms) to a 0..5 cellphone-style signal level.
         // -1 means "no measurement yet" (drawn as dim/empty bars, no claim made).
         // This is the FULL cloud round-trip — network PLUS server-side board
         // detection and engine inference — not a raw network ping. Even on a great
         // line (gigabit, fast PC) the floor is ~200 ms because the server has to
-        // think, so the thresholds are deliberately generous: ~220 ms is excellent
+        // think, so the thresholds are deliberately generous: ~250 ms is excellent
         // here, and only a genuinely struggling link climbs past half a second.
         private static int LatencyToSignalBars(long latencyMs)
         {
             if (latencyMs <= 0) return -1;
-            if (latencyMs < 280) return 4;    // excellent (at/near the inference floor)
-            if (latencyMs < 450) return 3;    // good
-            if (latencyMs < 750) return 2;    // fair
-            if (latencyMs < 1200) return 1;   // weak
+            if (latencyMs < 260) return 5;    // excellent (at/near the inference floor)
+            if (latencyMs < 380) return 4;    // very good
+            if (latencyMs < 550) return 3;    // good
+            if (latencyMs < 850) return 2;    // fair
+            if (latencyMs < 1300) return 1;   // weak
             return 0;                          // very poor
         }
 
@@ -2314,7 +2315,8 @@ namespace ChessKit
         {
             string strength = _signalBars switch
             {
-                4 => "Excellent",
+                5 => "Excellent",
+                4 => "Very good",
                 3 => "Good",
                 2 => "Fair",
                 1 => "Weak",
@@ -2322,8 +2324,9 @@ namespace ChessKit
                 _ => "Measuring"
             };
             string latency = _lastLatencyMs > 0 ? $"~{_lastLatencyMs} ms round-trip" : "no sample yet";
+            string rate = _currentFps > 0 ? $"\nVision updates: {_currentFps:F1}/s" : "";
             return
-                $"Server connection quality: {strength} ({latency}).\n\n" +
+                $"Server connection quality: {strength} ({latency}).{rate}\n\n" +
                 "Reflects the round-trip to the cloud server for board\n" +
                 "detection and the AI engine. Local engines are unaffected.";
         }
@@ -2654,15 +2657,19 @@ namespace ChessKit
             }
             else
             {
-                // FPS text, right after the buttons.
+                // Latency text, right after the buttons - colored by the same
+                // tier as the signal bars (gaming-ping style), dim while no
+                // sample has been measured yet.
                 var textRect = new Rectangle(metricsStartX, stripTop, Math.Max(1, textWidth), stripHeight);
                 using (var metricsFormat = new StringFormat
                 {
                     Alignment = StringAlignment.Near,
                     LineAlignment = StringAlignment.Center
                 })
+                using (var pingBrush = new SolidBrush(
+                    _lastLatencyMs > 0 ? SignalBarColor(_signalBars) : Color.FromArgb(150, 150, 155)))
                 {
-                    g.DrawString(fpsText, _metricsFont, _metricsBrush, textRect, metricsFormat);
+                    g.DrawString(fpsText, _metricsFont, pingBrush, textRect, metricsFormat);
                 }
 
                 // Connection-status dot, tight against the FPS text.
@@ -2757,7 +2764,7 @@ namespace ChessKit
         }
 
         private const int ClusterGapPx = 10;          // gap between cluster items (logical)
-        private const int SignalBarsContentWidth = 18; // 4 bars * 3 + 3 gaps * 2 (logical)
+        private const int SignalBarsContentWidth = 23; // 5 bars * 3 + 4 gaps * 2 (logical)
 
         // The amber chip label. Ordinarily "FREE"; when the license is INACTIVE
         // (suspended/expired/revoked/unknown) it names the reason ("SUSPENDED" /
@@ -2863,7 +2870,7 @@ namespace ChessKit
             int gap = ScaleToDevice(ClusterGapPx);
 
             // ---- Signal bars (rightmost, shown for everyone) ----
-            int barCount = 4;
+            int barCount = 5;
             int barWidth = ScaleToDevice(3);
             int barGap = ScaleToDevice(2);
             int barsWidth = barCount * barWidth + (barCount - 1) * barGap;
@@ -2986,9 +2993,10 @@ namespace ChessKit
         {
             return bars switch
             {
-                >= 3 => Color.FromArgb(64, 220, 112),    // strong (matches connected dot)
-                2 => Color.FromArgb(240, 200, 90),       // ok
-                1 => Color.FromArgb(255, 142, 66),       // weak
+                >= 4 => Color.FromArgb(64, 220, 112),    // strong (matches connected dot)
+                3 => Color.FromArgb(240, 200, 90),       // good
+                2 => Color.FromArgb(255, 142, 66),       // fair
+                1 => Color.FromArgb(250, 108, 64),       // weak
                 0 => Color.FromArgb(235, 82, 82),        // none / very poor
                 _ => Color.FromArgb(120, 150, 150, 155)  // unknown (dim)
             };
@@ -3019,15 +3027,20 @@ namespace ChessKit
             };
         }
 
+        // The user-facing metric in the bottom strip is the server round-trip
+        // latency (gaming-style ping), colored by the same tier as the signal
+        // bars. FPS moved to the debug HUD - a capture/upload rate means little
+        // to users, while "how fast do my arrows come back" is exactly this ms.
         private string BuildMetricsText()
         {
+            string ping = _lastLatencyMs > 0 ? $"{_lastLatencyMs} ms" : "-- ms";
             if (!_toolbarNetworkStatsEnabled)
-                return $"FPS: {_currentFps:F1}";
+                return ping;
 
             string transport = string.IsNullOrWhiteSpace(_networkMetrics.Transport)
                 ? "none"
                 : _networkMetrics.Transport;
-            return $"FPS: {_currentFps:F1} | {transport} | {_networkMetrics.KilobytesPerSecond:F2} KB/s | avg {_networkMetrics.AveragePacketKilobytes:F2} KB";
+            return $"{ping} | {transport} | {_networkMetrics.KilobytesPerSecond:F2} KB/s | avg {_networkMetrics.AveragePacketKilobytes:F2} KB";
         }
 
         // Width reserved for the FPS slot in the bottom toolbar strip. This
@@ -3622,7 +3635,7 @@ namespace ChessKit
             }
 
             var networkStatsLabelRect = new Rectangle(networkStatsRect.Right + 10, y + 80, contentWidth - 10, 40);
-            g.DrawString("Show network stats beside FPS", _labelFont, _textBrush, networkStatsLabelRect, rowFmt);
+            g.DrawString("Show network stats beside ping", _labelFont, _textBrush, networkStatsLabelRect, rowFmt);
 
             int buttonRowTop = y + 124;
             var keyButtonRect = GetKeyBindingsButtonRect();

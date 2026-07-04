@@ -33,6 +33,12 @@ namespace ChessKit
         // the original Interlocked.Exchange(ref _licenseFailureNoticeShown, 1).
         private readonly Func<int> _exchangeFailureNoticeShown;
 
+        // Shown ONLY when the server is unreachable during the startup check (a
+        // NetworkError), so a paying user is never silently dropped to Free over a
+        // transient outage. Returns the user's choice (Retry / ContinueFree / Exit).
+        // Null (e.g. Debug) => behave as before and continue as Free.
+        private readonly Func<LicenseValidationResult, LicenseUnreachableChoice>? _promptServerUnreachable;
+
         // STICKY for the life of the process: latched true the first time a license
         // verifies this session and NEVER reset to false. The rest of the app reads
         // it (via Program.HasVerifiedFullVersionLicense) to decide Free vs Licensed.
@@ -50,7 +56,8 @@ namespace ChessKit
             Action closeStartupStatus,
             Func<Control?> getOverlay,
             Action<string> invalidateRuntimeState,
-            Func<int> exchangeFailureNoticeShown)
+            Func<int> exchangeFailureNoticeShown,
+            Func<LicenseValidationResult, LicenseUnreachableChoice>? promptServerUnreachable = null)
         {
             _log = log;
             _tryCopyTextToClipboard = tryCopyTextToClipboard;
@@ -58,6 +65,7 @@ namespace ChessKit
             _getOverlay = getOverlay;
             _invalidateRuntimeState = invalidateRuntimeState;
             _exchangeFailureNoticeShown = exchangeFailureNoticeShown;
+            _promptServerUnreachable = promptServerUnreachable;
         }
 
         /// <summary>
@@ -87,51 +95,78 @@ namespace ChessKit
         /// </summary>
         public async Task<bool> EnforceAsync()
         {
-            LicenseValidationResult result;
-            try
+            while (true)
             {
-                result = await LicenseValidator.ValidateFullVersionAsync();
-            }
-            catch (Exception ex)
-            {
-                // Never let a verification fault abort startup; just run as Free.
-                // Treat a hard fault like an offline/unknown check: Free, reason
-                // Inactive (we can't confirm the license either way).
-                _log($"[LICENSE] Verification error; continuing as Free Edition: {ex.Message}");
-                LicenseStatusInfo.SetReason(LicenseInactiveReason.Inactive);
-                StartMonitor(new LicenseValidationResult
+                LicenseValidationResult result;
+                try
                 {
-                    State = LicenseValidationState.NetworkError,
-                    HardwareId = HardwareIdentity.GetHardwareId(),
-                    Message = ex.Message
-                });
+                    result = await LicenseValidator.ValidateFullVersionAsync();
+                }
+                catch (Exception ex)
+                {
+                    // Unexpected fault: we couldn't confirm the license either way.
+                    // Treat it as a server-unreachable network error so the user is
+                    // offered the same Retry / Free / Exit choice below rather than a
+                    // silent (and alarming) drop to Free.
+                    _log($"[LICENSE] Verification error: {ex.Message}");
+                    result = new LicenseValidationResult
+                    {
+                        State = LicenseValidationState.NetworkError,
+                        HardwareId = HardwareIdentity.GetHardwareId(),
+                        Message = ex.Message
+                    };
+                }
+
+                if (result.IsLicensed)
+                {
+                    _fullVersionLicenseVerified = true;
+                    LicenseStatusInfo.SetReason(LicenseInactiveReason.None);
+                    _log($"[LICENSE] Active license verified. Plan={result.Plan}, Expires={result.ExpiresAtUtc:O}");
+                    StartMonitor(result);
+                    return true;
+                }
+
+                // The server was REACHED and gave a real answer of "no" (not licensed /
+                // expired / suspended / revoked), or an untrusted response. That is not
+                // an outage, so keep the established silent Free behaviour — we must not
+                // nag a genuinely-unlicensed user with a connection dialog. Derive the
+                // reason from the precise status for the watermark/chip.
+                if (result.State != LicenseValidationState.NetworkError)
+                {
+                    LicenseInactiveReason reason = LicenseStatusInfo.FromStatus(result.Status);
+                    LicenseStatusInfo.SetReason(reason);
+                    _log($"[LICENSE] No active license; continuing as Free Edition. State={result.State}, Status={result.Status}, Reason={reason}");
+                    StartMonitor(result);
+                    return true;
+                }
+
+                // NetworkError => the servers are unreachable. Do NOT silently fall to
+                // Free: to a paying user that looks exactly like a revoked license. Ask.
+                // (No prompt wired, e.g. Debug -> behave as before and continue Free.)
+                LicenseUnreachableChoice choice = _promptServerUnreachable?.Invoke(result)
+                    ?? LicenseUnreachableChoice.ContinueFree;
+
+                if (choice == LicenseUnreachableChoice.Retry)
+                {
+                    _log("[LICENSE] Server unreachable; user chose to retry.");
+                    continue;
+                }
+
+                if (choice == LicenseUnreachableChoice.Exit)
+                {
+                    // Caller aborts startup cleanly (mirrors RunStartupFlow == false).
+                    _log("[LICENSE] Server unreachable; user chose to exit.");
+                    return false;
+                }
+
+                // ContinueFree: run as Free for this session. The background monitor
+                // keeps polling and will UPGRADE Free -> Licensed automatically once
+                // the servers are reachable again — no restart needed.
+                LicenseStatusInfo.SetReason(LicenseInactiveReason.Inactive);
+                _log("[LICENSE] Server unreachable; user chose to continue in Free mode.");
+                StartMonitor(result);
                 return true;
             }
-
-            if (result.IsLicensed)
-            {
-                _fullVersionLicenseVerified = true;
-                LicenseStatusInfo.SetReason(LicenseInactiveReason.None);
-                _log($"[LICENSE] Active license verified. Plan={result.Plan}, Expires={result.ExpiresAtUtc:O}");
-            }
-            else
-            {
-                // Capture WHY we're Free so the watermark/chip can say so. A
-                // network error means we couldn't confirm the license (offline /
-                // unknown) -> Inactive; otherwise derive from the precise status
-                // (suspended/expired/revoked, else Inactive; never-licensed -> None).
-                LicenseInactiveReason reason = result.State == LicenseValidationState.NetworkError
-                    ? LicenseInactiveReason.Inactive
-                    : LicenseStatusInfo.FromStatus(result.Status);
-                LicenseStatusInfo.SetReason(reason);
-                _log($"[LICENSE] No active license; continuing as Free Edition. State={result.State}, Status={result.Status}, Reason={reason}");
-            }
-
-            // Start the monitor in both cases. While licensed it re-verifies and can
-            // detect expiry (without downgrading the sticky flag); while Free it
-            // polls so a purchase made during this session upgrades to Licensed.
-            StartMonitor(result);
-            return true;
         }
 
         /// <summary>
