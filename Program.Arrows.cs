@@ -8,6 +8,128 @@ using static ChessKit.AnalysisResultUtil;
 // Arrow refresh, last-move highlight, optimistic move inference, snapshot/orientation.
 partial class Program
 {
+    // Backstop for a dropped/superseded overlay paint. The freeze mode: the app
+    // BELIEVES it is showing arrows for the current board (_showingMoves == true,
+    // _currentMoveArrows updated, _lastArrowSourceFEN == current board) yet the
+    // overlay's pixels still show the PREVIOUS position's arrows because a
+    // ShowMoveArrows call was silently dropped as a stale generation. Neither the
+    // [STALE] watchdog nor MaybeRecoverStableSparseArrows catches this (both bail
+    // while _showingMoves is true). This re-asserts the current arrows with a
+    // strictly-incremented (never-dropped) generation on a stable board: a visual
+    // no-op when the overlay already matches (ShowMoveArrows short-circuits on an
+    // unchanged signature), a correction when it froze. Mechanism-agnostic.
+    private static void ReconcileExternalArrowOverlay()
+    {
+        if (_overlay == null ||
+            !_showingMoves ||
+            !_continuousAnalysisEnabled ||
+            _analysisInProgress ||
+            _currentFenIsAnalysisBoard ||
+            IsActiveAnalysisBoardFen(_currentFEN) ||
+            IsExternalBoardOutputSuspended() ||
+            !_lastTrackedBox.HasValue ||
+            string.IsNullOrEmpty(_currentFEN) ||
+            !CanDisplayArrowsForCurrentState())
+        {
+            return;
+        }
+
+        DateTime now = DateTime.UtcNow;
+        if (now < _lastArrowReconcileUtc.AddMilliseconds(ArrowReconcileIntervalMs) ||
+            now < _recentMouseInteractionUntilUtc ||
+            now < _externalArrowHoldUntilUtc ||
+            now < _lastExternalRawBoardChangeUtc.AddMilliseconds(ArrowReconcileBoardStableMs))
+        {
+            return;
+        }
+
+        // Surface overlay stale-generation drops (the freeze mechanism, arrows OR
+        // coach marks) into runtime.log the moment they accumulate, so a stuck
+        // report is diagnosable without the arrow-timeline flag.
+        long drops = OverlayForm.DroppedStaleGenerationShows;
+        bool droppedSinceLast = drops != _lastLoggedArrowDrops;
+
+        // Coach mode uses a separate overlay surface + data (_currentMoveArrows is
+        // null), so re-drive ShowCoachOverlay from the last stable coach data.
+        if (_coachModeEnabled)
+        {
+            if (ReconcileCoachOverlay(now))
+            {
+                if (droppedSinceLast)
+                {
+                    Log($"[ARROW] overlay dropped {drops - _lastLoggedArrowDrops} stale-generation show(s) (total {drops}); reconciling coach overlay");
+                    _lastLoggedArrowDrops = drops;
+                }
+            }
+            return;
+        }
+
+        // Only ever re-assert arrows that belong to the CURRENT confirmed board;
+        // never during a transition. This unlocked cross-thread read is safe
+        // because the analysis worker writes _currentMoveArrows BEFORE
+        // _lastArrowSourceFEN (Program.Analysis.cs), and only after passing its
+        // own _currentFEN==capturedFEN guard; _currentFEN is written only on this
+        // (main-loop) thread, so IsSameArrowSourcePosition can never observe a
+        // sourceFEN newer than its arrows. Keep those two writes in that order.
+        if (_currentMoveArrows == null ||
+            _currentMoveArrows.Count == 0 ||
+            !IsSameArrowSourcePosition(_currentFEN))
+        {
+            return;
+        }
+        _lastArrowReconcileUtc = now;
+
+        if (droppedSinceLast)
+        {
+            Log($"[ARROW] overlay dropped {drops - _lastLoggedArrowDrops} stale-generation show(s) (total {drops}); reconciling current arrows");
+            _lastLoggedArrowDrops = drops;
+        }
+
+        // Bump the generation so the re-dispatch cannot be dropped as stale, then
+        // reuse the normal display path (which no-ops visually if unchanged).
+        Interlocked.Increment(ref _arrowDisplayGeneration);
+        RefreshDisplayedArrows();
+    }
+
+    // Coach-mode counterpart of the arrow reconciler: re-assert the last stable
+    // coach overlay for the CURRENT confirmed board with an un-droppable
+    // generation, so a dropped coach show cannot freeze stale marks on screen.
+    // Visual no-op when the overlay already matches (BuildCoachSignature
+    // short-circuit). Returns true if a re-assert was dispatched.
+    private static bool ReconcileCoachOverlay(DateTime now)
+    {
+        if (_overlay == null || !_lastTrackedBox.HasValue)
+            return false;
+
+        CoachOverlayData? data;
+        lock (_coachOverlaySquaresLock)
+        {
+            data = _lastShownCoachData;
+            if (data == null ||
+                data.Marks.Count == 0 ||
+                !string.Equals(GetArrowPositionKey(_lastShownCoachFen), GetArrowPositionKey(_currentFEN), StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        _lastArrowReconcileUtc = now;
+        var r = _lastTrackedBox.Value;
+        int renderToken = Volatile.Read(ref _arrowRenderToken);
+        int generation = Interlocked.Increment(ref _arrowDisplayGeneration);
+        _overlay.BeginInvoke(new Action(() =>
+        {
+            if (renderToken != Volatile.Read(ref _arrowRenderToken))
+                return;
+            lock (_analysisLock)
+            {
+                if (_showingMoves && _coachModeEnabled && CanDisplayArrowsForCurrentState())
+                    _overlay.ShowCoachOverlay(new Rectangle(r.X, r.Y, r.Width, r.Height), data, generation, 60000);
+            }
+        }));
+        return true;
+    }
+
     private static void RefreshDisplayedArrows()
     {
         // Defense in depth: while the lost-tracking latch is set, refuse
@@ -813,6 +935,10 @@ partial class Program
         {
             _lastCoachOverlaySquaresPositionKey = key;
             _lastCoachOverlaySquares = squares;
+            // Retain the full stable coach data + its FEN so the reconciler can
+            // re-drive ShowCoachOverlay if a coach show is dropped (frozen marks).
+            _lastShownCoachData = data;
+            _lastShownCoachFen = fen;
         }
     }
 
@@ -1458,6 +1584,24 @@ partial class Program
             return;
         }
 
+        // MID-GAME COLD START: no move history and not an opening position -
+        // the one case where pixels can still answer whose move it is. The
+        // vision model's advisory highlight squares (class-13), composed
+        // through the strict pair-gate (exactly two highlights, empty
+        // from-square + occupied to-square, legal piece geometry), identify
+        // who just moved. Consulted only when the structural inferences above
+        // found nothing, never against them; inert unless the server emits
+        // highlights (env-gated, requires the class-13 model).
+        if (_analysisBothEnabled &&
+            _externalTrackedPositionCount <= 2 &&
+            TryInferSideToMoveFromVisionHighlights(fen, out char highlightSide, out string highlightDetail))
+        {
+            _inferredSideToMove = highlightSide;
+            LogTurnInference(
+                $"side inferred from highlight pair-gate {highlightDetail} side-to-move={highlightSide} board={boardPosition}");
+            return;
+        }
+
         if (_analysisBothEnabled &&
             _externalTrackedPositionCount <= 1 &&
             TryGetExternalFenSideToMoveFallback(fen, out char fenSideToMove))
@@ -1466,6 +1610,77 @@ partial class Program
             LogTurnInference(
                 $"initial W+B side fallback from detected FEN side-to-move={_inferredSideToMove} board={boardPosition}");
         }
+
+        // SHADOW: on every position, compare the highlight pair-gate's verdict
+        // against whatever the cascade above (or the untouched prior state)
+        // decided. Logs only - no behavior change. This is the evidence run
+        // for promoting the pair-gate to a correcting vote: the diff-based
+        // mover inference is known to misread captures/multi-square landings
+        // (user-reported: opponent captured, arrows drawn for the opponent
+        // twice), while the highlight pair names the mover from pixels.
+        // Inert until the server emits highlights (class-13 model + env).
+        if (TryInferSideToMoveFromVisionHighlights(fen, out char shadowSide, out string shadowDetail))
+        {
+            if (shadowSide != _inferredSideToMove)
+            {
+                LogTurnInference(
+                    $"SHADOW-MISMATCH highlight pair-gate says side-to-move={shadowSide} {shadowDetail} " +
+                    $"but inference settled on {_inferredSideToMove} (count={_externalTrackedPositionCount}) board={boardPosition}");
+            }
+            else if (_diagLoggingEnabled)
+            {
+                LogTurnInference($"shadow highlight pair-gate agrees: side-to-move={shadowSide} {shadowDetail}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Advisory turn vote from the vision model's highlighted-square output.
+    /// The sample must describe THIS position (board fields equal) - a stale
+    /// pair from the previous move would name the wrong mover - and must
+    /// survive TurnHintDetector's pair-gate. See that class for the rules.
+    /// </summary>
+    private static bool TryInferSideToMoveFromVisionHighlights(string fen, out char sideToMove, out string detail)
+    {
+        sideToMove = 'w';
+        detail = "";
+        var sample = BoardVisionDetector.GetLastVisionHighlights();
+        if (sample == null)
+            return false;
+        string board = GetBoardPosition(fen);
+        if (string.IsNullOrEmpty(board))
+            return false;
+
+        // The sample carries the RAW server FEN + squares in as-seen
+        // orientation; the confirmed fen for a black-at-bottom board has been
+        // Rotate180-normalized. Without rotating the sample to match, the
+        // equality gate below could never pass on flipped boards - the
+        // feature would be silently dead whenever the user plays Black.
+        string sampleBoard = GetBoardPosition(sample.Value.Fen);
+        IReadOnlyList<string> highlights = sample.Value.Highlights;
+        if (_externalBoardDetectedFlipped)
+        {
+            sampleBoard = GetBoardPosition(Rotate180(sample.Value.Fen));
+            highlights = highlights.Select(MirrorSquare180).ToArray();
+        }
+        if (!string.Equals(sampleBoard, board, StringComparison.Ordinal))
+            return false;
+
+        var hint = ChessKit.Vision.TurnHintDetector.TryInferLastMove(highlights, board);
+        if (hint == null)
+            return false;
+        sideToMove = hint.Value.SideToMove;
+        detail = $"({hint.Value.FromSquare}->{hint.Value.ToSquare} mover={hint.Value.MoverColor})";
+        return true;
+    }
+
+    private static string MirrorSquare180(string sq)
+    {
+        if (string.IsNullOrEmpty(sq) || sq.Length != 2)
+            return sq;
+        char file = (char)('a' + ('h' - char.ToLowerInvariant(sq[0])));
+        char rank = (char)('1' + ('8' - sq[1]));
+        return $"{file}{rank}";
     }
 
     private static void LogTurnInference(string message)
@@ -1704,22 +1919,39 @@ partial class Program
     /// </summary>
     private static void HideOverlaysVisually()
     {
-        // During a swap hold the previous arrows are still painted while
-        // _showingMoves is false - they must vanish with the window too, or
-        // they float over whatever is behind it until the hold expires.
-        bool holdPending = DateTime.UtcNow < _externalArrowHoldUntilUtc;
-        if ((_showingMoves || holdPending) && _overlay != null)
+        // Suppress the main loop's fast-path re-shows BEFORE hiding anything:
+        // MINIMIZESTART fires before IsIconic flips, so a frame already in
+        // flight would otherwise SetBoardVisible(true) right after this hide
+        // and the eval bar/lines would float over other apps until the next
+        // poll caught up. ShowOverlaysForTrackedWindow clears the flag on the
+        // legitimate re-acquire paths.
+        Interlocked.Exchange(ref _overlaySuppressedAtTick, Environment.TickCount64);
+        _overlaySuppressed = true;
+
+        // Hide the arrow overlay UNCONDITIONALLY. The old guard on
+        // (_showingMoves || holdPending) skipped the form whenever arrows
+        // weren't the active content - leaving the Free-cooldown watermark
+        // and debug/flash boxes floating over other apps after a minimize.
+        _externalArrowHoldUntilUtc = DateTime.MinValue;
+        int hideGen = Interlocked.Increment(ref _arrowDisplayGeneration);
+        Interlocked.Increment(ref _arrowRenderToken);
+        if (_overlay != null)
         {
-            _externalArrowHoldUntilUtc = DateTime.MinValue;
-            int hideGen = Interlocked.Increment(ref _arrowDisplayGeneration);
-            Interlocked.Increment(ref _arrowRenderToken);
             try
             {
-                _overlay.BeginInvoke(new Action(() => _overlay.HideArrows(hideGen, preserveFreeLimitWatermark: false)));
+                _overlay.BeginInvoke(new Action(() =>
+                {
+                    // HideArrows first: it advances the form-side generation so
+                    // any queued stale ShowMoveArrows gets rejected. Then
+                    // HideOverlay for the full clear (rects, watermark, flash)
+                    // + unconditional Hide - nothing may outlive the window.
+                    _overlay.HideArrows(hideGen, preserveFreeLimitWatermark: false);
+                    _overlay.HideOverlay();
+                }));
             }
             catch { /* form may have been disposed */ }
-            _showingMoves = false;
         }
+        _showingMoves = false;
 
         // SetBoardVisible on these forms internally marshals to their
         // own UI thread, so this is thread-safe to call from anywhere.
@@ -1730,6 +1962,42 @@ partial class Program
         // Arrows/eval/lines are tied to the board and must disappear, but
         // the toolbar should snap back to its neutral top-center position.
         try { ShowToolbarAtFallbackPosition(); } catch { }
+    }
+
+    /// <summary>
+    /// The single re-show path for the board-anchored overlay group (eval bar
+    /// + engine lines; arrows redraw via their own verified pipeline). Clears
+    /// the suppression latch set by HideOverlaysVisually, so a hide fired from
+    /// the WinEvent hook can never be undone by a stale in-flight frame - only
+    /// by this deliberate call from a legitimate tracking/re-acquire path.
+    /// </summary>
+    private static void ShowOverlaysForTrackedWindow()
+    {
+        _overlaySuppressed = false;
+        try { _evalBar?.SetBoardVisible(true); } catch { }
+        try { _engineLines?.SetBoardVisible(true); } catch { }
+        try { _settingsToolbar?.SetBoardVisible(true); } catch { }
+    }
+
+    /// <summary>
+    /// Per-frame variant for the healthy tracking fast paths. Honors the
+    /// suppression latch so a frame in flight during a minimize cannot
+    /// re-show over other apps - but releases the latch after 400ms of
+    /// continued healthy tracking (longer than the minimize animation, so a
+    /// REAL minimize reaches the IsTrackable poll and latches tracking-lost
+    /// first; a canceled minimize or ended occlusion legitimately resumes).
+    /// </summary>
+    private static void MaybeShowOverlaysOnHealthyTrack()
+    {
+        if (_overlaySuppressed)
+        {
+            if (Environment.TickCount64 - Interlocked.Read(ref _overlaySuppressedAtTick) < 400)
+                return;
+            _overlaySuppressed = false;
+        }
+        _evalBar?.SetBoardVisible(true);
+        _engineLines?.SetBoardVisible(true);
+        _settingsToolbar?.SetBoardVisible(true);
     }
 
     /// <summary>

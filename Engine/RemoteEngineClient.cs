@@ -395,7 +395,12 @@ namespace ChessKit
                 Fen = fen,
                 Depth = depth > 0 ? depth : null,
                 MoveTimeMs = Math.Max(0, thinkTimeMs),
-                MultiPv = Math.Clamp(multiPv <= 0 ? 3 : multiPv, 1, BuildLimits.MaxLines),
+                // Client-side ceiling only (MaxEnginePvLines so the Bullet
+                // profile's MultiPV 10 survives). The broker itself currently
+                // clamps MultiPV to 5 via env CHESSKIT_ENGINE_MAX_MULTIPV
+                // unless that env is raised server-side; the profile still
+                // functions at 5 lines, just with narrower PV-cache coverage.
+                MultiPv = Math.Clamp(multiPv <= 0 ? 3 : multiPv, 1, BuildLimits.MaxEnginePvLines),
                 Threads = Math.Clamp(threads <= 0 ? 1 : threads, 1, 64),
                 HashMb = Math.Clamp(hashMb <= 0 ? 32 : hashMb, 1, 4096),
                 FixedDepthOnly = fixedDepthOnly,

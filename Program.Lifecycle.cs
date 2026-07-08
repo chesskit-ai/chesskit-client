@@ -213,7 +213,7 @@ partial class Program
                 LogCurrentEngine("Restarting engine");
                 _stockfish = new UCIEngine(enginePath);
                 _stockfish.InitialDepth = _settingsToolbar?.GetInitialDepth() ?? 8;
-                _stockfish.MaxDepth = BuildLimits.ClampDepth(_settingsToolbar?.GetMaxDepth() ?? BuildLimits.MaxDepth);
+                _stockfish.MaxDepth = GetLiveEngineConfiguredMaxDepth();
                 _stockfish.InfiniteAnalysis = BuildLimits.AllowInfiniteAnalysis && (_settingsToolbar?.GetInfiniteAnalysis() ?? false);
                 _stockfish.InitialThinkTime = 50;
                 _stockfish.MaxThinkTime = 2000;
@@ -268,22 +268,14 @@ partial class Program
                 persistShowTaskbarIcon: v => _settingsToolbar?.SyncTaskbarIconState(v),
                 onExit: RequestApplicationExit);
             _systemTray.Initialize(_showSystemTrayIconAfterStartup);
-            // Free Edition only: the taskbar helper window is a Free-user affordance
-            // (upsell + quick actions). Licensed sessions don't get it.
-            if (BuildLimits.IsFreeEdition)
+            // Taskbar access window for BOTH editions. Free: always (a mandatory
+            // affordance - upsell + quick actions - so the setting is ignored).
+            // Licensed: on by default, but honors the persisted "Show taskbar
+            // window" toggle so the user can go tray-only (mirrors how the tray
+            // icon reads its persisted state through the settings toolbar).
+            if (BuildLimits.IsFreeEdition || (_settingsToolbar?.GetShowTaskbarWindowEnabled() ?? true))
             {
-                _freeEditionWindow = new FreeEditionWindow(
-                    onShowToolbar: RestoreSettingsToolbarFromTaskbar,
-                    onOpenAnalysisBoard: () => _analysisBoardForm?.ShowAnalysisBoard(),
-                    onToggleOverlay: () => _hotkeyController!.TriggerToggleOverlay(),
-                    onShowHardwareId: ShowHardwareIdFromTaskbar,
-                    onShowAbout: ShowAboutFromTaskbar,
-                    onExit: RequestApplicationExit,
-                    onUpgrade: ShowFreeUpsell,
-                    onQuickStart: ShowQuickStartFromTaskbar,
-                    onOpenSettings: OpenSettingsFromTaskbar,
-                    onCheckForUpdates: CheckForUpdatesFromTaskbar);
-                _freeEditionWindow.Initialize();
+                EnsureTaskbarWindowCreated();
             }
         }
 
@@ -298,6 +290,26 @@ partial class Program
         {
             Initialize();
         }
+    }
+
+    // Constructor wiring for the taskbar access window, shared by the startup
+    // path above and the "ShowTaskbarWindow" settings toggle (which must be able
+    // to create the window on demand when a Licensed user re-enables it after
+    // starting tray-only). Idempotent: an existing window is just (re)shown.
+    private static void EnsureTaskbarWindowCreated()
+    {
+        _taskbarWindow ??= new TaskbarWindow(
+            onShowToolbar: RestoreSettingsToolbarFromTaskbar,
+            onOpenAnalysisBoard: () => _analysisBoardForm?.ShowAnalysisBoard(),
+            onToggleOverlay: () => _hotkeyController!.TriggerToggleOverlay(),
+            onShowHardwareId: ShowHardwareIdFromTaskbar,
+            onShowAbout: ShowAboutFromTaskbar,
+            onExit: RequestApplicationExit,
+            onUpgrade: ShowFreeUpsell,
+            onQuickStart: ShowQuickStartFromTaskbar,
+            onOpenSettings: OpenSettingsFromTaskbar,
+            onCheckForUpdates: CheckForUpdatesFromTaskbar);
+        _taskbarWindow.Initialize();
     }
 
     private static void RestoreSettingsToolbarFromTaskbar()
@@ -400,10 +412,9 @@ partial class Program
         }
     }
 
-    // Free Edition actions surfaced as buttons in the Free Edition taskbar window
-    // (FreeEditionWindow). ("Upgrade" reuses ShowFreeUpsell, defined just
-    // below.) Always compiled; only reached when the window is shown (Free at
-    // runtime).
+    // Actions surfaced as buttons in the taskbar access window (TaskbarWindow),
+    // used by both editions. ("Upgrade" reuses ShowFreeUpsell, defined just
+    // below; the window only offers it when running Free.)
 
     // Restore the toolbar and open its expanded settings panel.
     private static void OpenSettingsFromTaskbar()
@@ -436,16 +447,27 @@ partial class Program
             owner.Show();
             try
             {
-                NoticeDialogForm.ShowNotice(
-                    owner,
-                    "Quick start",
-                    "Using Chess Kit (Free Edition)",
+                // The taskbar window is shown to both editions now; only Free
+                // gets the move-cap/upgrade footer line.
+                string subtitle = BuildLimits.IsFreeEdition
+                    ? "Using Chess Kit (Free Edition)"
+                    : "Using Chess Kit";
+                string body =
                     "1.  Open the chessboard you want to analyze in any window.\n" +
                     "2.  Press F1 (or \"Show toolbar\") to bring up the floating toolbar.\n" +
                     "3.  Click W, B, or W+B to analyze for White, Black, or both sides.\n" +
-                    "4.  Best-move arrows and the evaluation bar are drawn over the board.\n\n" +
-                    "The Free Edition gives full-speed arrows for about 15 moves, then a brief " +
-                    "cooldown before assistance resumes. Upgrade for unlimited moves and the human-play engine.",
+                    "4.  Best-move arrows and the evaluation bar are drawn over the board.";
+                if (BuildLimits.IsFreeEdition)
+                {
+                    body +=
+                        "\n\nThe Free Edition gives full-speed arrows for about 15 moves, then a brief " +
+                        "cooldown before assistance resumes. Upgrade for unlimited moves and the human-play engine.";
+                }
+                NoticeDialogForm.ShowNotice(
+                    owner,
+                    "Quick start",
+                    subtitle,
+                    body,
                     hardwareId: "",
                     NoticeDialogKind.Info,
                     copiedToClipboard: false,
@@ -464,7 +486,7 @@ partial class Program
             Show();
     }
 
-    // Manual update check from the Free Edition window. Reuses the same update dialog +
+    // Manual update check from the taskbar window. Reuses the same update dialog +
     // choice handler as the Release startup check; shows a plain notice when the
     // app is already current or the check could not reach the server.
     private static async void CheckForUpdatesFromTaskbar()
@@ -476,7 +498,7 @@ partial class Program
         }
         catch (Exception ex)
         {
-            Log($"[UPDATE] Manual Free Edition update check failed: {ex.Message}");
+            Log($"[UPDATE] Manual taskbar-window update check failed: {ex.Message}");
             result = new UpdateCheckResult { Message = ex.Message };
         }
 
@@ -1000,7 +1022,7 @@ partial class Program
             engine = new UCIEngine(enginePath)
             {
                 InitialDepth = _settingsToolbar?.GetInitialDepth() ?? 8,
-                MaxDepth = BuildLimits.ClampDepth(_settingsToolbar?.GetMaxDepth() ?? BuildLimits.MaxDepth),
+                MaxDepth = GetLiveEngineConfiguredMaxDepth(),
                 InfiniteAnalysis = BuildLimits.AllowInfiniteAnalysis && (_settingsToolbar?.GetInfiniteAnalysis() ?? false),
                 InitialThinkTime = 50,
                 MaxThinkTime = 2000,

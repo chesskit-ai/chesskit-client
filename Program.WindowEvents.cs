@@ -28,15 +28,28 @@ partial class Program
         }
 
         bool isWindowObjectEvent = WinEventHelper.IsWinEventWindowObject(idObject, idChild);
-        bool isTrackedWindowGoneEvent =
-            (eventType == WindowTracker.EVENT_SYSTEM_MINIMIZESTART && isWindowObjectEvent)
-            || (eventType == WindowTracker.EVENT_OBJECT_DESTROY && isWindowObjectEvent);
+        // "Gone" = anything that takes the tracked window off the user's view:
+        // minimize, destroy, SW_HIDE (close-to-tray apps), or DWM cloak
+        // (virtual-desktop switch). All of these must hide every overlay
+        // surface instantly - lingering arrows/eval bar over OTHER apps is
+        // the bug this handler exists to prevent.
+        bool isTrackedWindowGoneEvent = isWindowObjectEvent &&
+            (eventType == WindowTracker.EVENT_SYSTEM_MINIMIZESTART
+             || eventType == WindowTracker.EVENT_OBJECT_DESTROY
+             || eventType == WindowTracker.EVENT_OBJECT_HIDE
+             || eventType == WindowTracker.EVENT_OBJECT_CLOAKED);
 
         if (isTrackedWindowGoneEvent)
         {
             if (_diagLoggingEnabled)
             {
-                string evt = eventType == WindowTracker.EVENT_OBJECT_DESTROY ? "destroyed" : "minimize-start";
+                string evt = eventType switch
+                {
+                    WindowTracker.EVENT_OBJECT_DESTROY => "destroyed",
+                    WindowTracker.EVENT_OBJECT_HIDE => "hidden",
+                    WindowTracker.EVENT_OBJECT_CLOAKED => "cloaked",
+                    _ => "minimize-start"
+                };
                 LogDiag("WINTRACK", $"system event: tracked window {evt} - hiding overlays instantly");
             }
             // Cancel any in-flight analysis. Without this, an analysis
@@ -67,16 +80,26 @@ partial class Program
         {
             LogDiag("WINTRACK", $"system event: ignored non-window minimize-start for tracked hwnd idObject={idObject} idChild={idChild}");
         }
-        else if (eventType == WindowTracker.EVENT_SYSTEM_MINIMIZEEND && isWindowObjectEvent)
+        else if (isWindowObjectEvent &&
+                 (eventType == WindowTracker.EVENT_SYSTEM_MINIMIZEEND
+                  || eventType == WindowTracker.EVENT_OBJECT_SHOW
+                  || eventType == WindowTracker.EVENT_OBJECT_UNCLOAKED))
         {
-            // The OS is telling us this window just un-minimized.
+            // The OS is telling us this window just came back (un-minimized,
+            // re-shown from tray, or un-cloaked by a virtual-desktop switch).
             // We use this as the AUTHORITATIVE signal for a legitimate
             // user-initiated restore - IsIconic polling is unreliable
             // on some machines (oscillates without user action), but
-            // MINIMIZE_END only fires for actual restore operations.
+            // these events only fire for actual restore operations.
             // Setting this flag is what allows the lost-tracking poll
             // in the main loop to release the latch.
             _minimizeEndFiredForLostHwnd = true;
+            // Release the overlay-suppression latch immediately: if the
+            // minimize was canceled (or this is a same-desktop return) the
+            // main loop may never latch tracking-lost, and the healthy fast
+            // path must be free to re-show without waiting out the 400ms
+            // time-release in MaybeShowOverlaysOnHealthyTrack.
+            _overlaySuppressed = false;
             if (_diagLoggingEnabled)
             {
                 LogDiag("WINTRACK", $"system event: minimize-end fired for hwnd=0x{hwnd.ToInt64():X} (matchesTracked={matchesTracked} matchesLost={matchesLost})");
@@ -229,7 +252,7 @@ partial class Program
 
         if (boardPositionChanged)
         {
-            ClearDisplayedArrowsForPositionChange();
+            ClearDisplayedArrowsForPositionChange(pendingSwapFen: confirmedFen);
             MarkApplyStep("pre-position-change arrow clear");
 
             bool suppressRecentStateRestore = HasFreshGameResetCandidate() || IsLikelyFreshOpeningPosition(confirmedFen);
@@ -1089,7 +1112,7 @@ partial class Program
         _lastArrowSourceFEN = "";
         if (_overlay != null)
         {
-            int generation = ++_arrowDisplayGeneration;
+            int generation = Interlocked.Increment(ref _arrowDisplayGeneration);
             _overlay.BeginInvoke(new Action(() =>
             {
                 _overlay.HideArrows(generation, preserveFreeLimitWatermark: false);

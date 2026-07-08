@@ -80,12 +80,15 @@ namespace ChessKit
         private bool _speculativeAnalysisEnabled = true;
         private SpeculativeAnalysisMode _speculativeAnalysisMode = SpeculativeAnalysisMode.Balanced;
         private BlitzModeSetting _blitzMode = BlitzModeSetting.On;
+        private bool _bulletProfileEnabled = false;
         private bool _humanAdaptiveEnabled = true;
         private HumanPlayProfile _humanPlayProfile = HumanPlayProfile.Balanced;
         private EvalDisplayMode _evalDisplayMode = EvalDisplayMode.Bar;
         private bool _showTaskbarIcon = true;
+        private bool _showTaskbarWindow = true;
         private bool _settingsToolbarHidden = false;
         private bool _toolbarNetworkStatsEnabled = false;
+        private bool _excludeOverlaysFromCapture = true;
         private HotkeyBindings _hotkeys = new();
 
         private const int ExpandedHeaderTop = 52;
@@ -318,6 +321,7 @@ namespace ChessKit
                 _speculativeAnalysisEnabled = settings.SpeculativeAnalysisEnabled;
                 _speculativeAnalysisMode = settings.SpeculativeAnalysisMode;
                 _blitzMode = settings.BlitzMode;
+                _bulletProfileEnabled = settings.ToolbarBulletProfileEnabled;
                 _humanAdaptiveEnabled = settings.HumanAdaptiveEnabled;
                 _humanPlayProfile = settings.HumanPlayProfile;
                 _evalDisplayMode = settings.EvalDisplayMode;
@@ -339,8 +343,10 @@ namespace ChessKit
                 _eloLimitEnabled = settings.ToolbarEloLimitEnabled;
                 _maxEloRating = Math.Clamp(settings.ToolbarMaxEloRating, 800, 3000);
                 _showTaskbarIcon = settings.ShowTaskbarIcon;
+                _showTaskbarWindow = settings.ShowTaskbarWindow;
                 _settingsToolbarHidden = settings.SettingsToolbarHidden;
                 _toolbarNetworkStatsEnabled = settings.ToolbarNetworkStatsEnabled;
+                _excludeOverlaysFromCapture = settings.ExcludeOverlaysFromCapture;
                 _hotkeys = settings.Hotkeys?.Clone() ?? new HotkeyBindings();
                 _hotkeys.Normalize();
             }
@@ -361,6 +367,7 @@ namespace ChessKit
             settings.SpeculativeAnalysisEnabled = _speculativeAnalysisEnabled;
             settings.SpeculativeAnalysisMode = _speculativeAnalysisMode;
             settings.BlitzMode = _blitzMode;
+            settings.ToolbarBulletProfileEnabled = _bulletProfileEnabled;
             settings.HumanAdaptiveEnabled = _humanAdaptiveEnabled;
             settings.HumanPlayProfile = _humanPlayProfile;
             settings.EvalDisplayMode = _evalDisplayMode;
@@ -377,8 +384,10 @@ namespace ChessKit
             settings.ToolbarEloLimitEnabled = _eloLimitEnabled;
             settings.ToolbarMaxEloRating = _maxEloRating;
             settings.ShowTaskbarIcon = _showTaskbarIcon;
+            settings.ShowTaskbarWindow = _showTaskbarWindow;
             settings.SettingsToolbarHidden = _settingsToolbarHidden;
             settings.ToolbarNetworkStatsEnabled = _toolbarNetworkStatsEnabled;
+            settings.ExcludeOverlaysFromCapture = _excludeOverlaysFromCapture;
             settings.Hotkeys = _hotkeys.Clone();
             _appSettingsManager.Save(settings);
         }
@@ -677,10 +686,14 @@ namespace ChessKit
         public bool GetSpeculativeAnalysisEnabled() => _speculativeAnalysisEnabled;
         public SpeculativeAnalysisMode GetSpeculativeAnalysisMode() => _speculativeAnalysisMode;
         public BlitzModeSetting GetBlitzMode() => _blitzMode;
+        public bool GetBulletProfileEnabled() => _bulletProfileEnabled;
         public bool GetHumanAdaptiveEnabled() => _humanAdaptiveEnabled;
         public HumanPlayProfile GetHumanPlayProfile() => _humanPlayProfile;
         public EvalDisplayMode GetEvalDisplayMode() => _evalDisplayMode;
         public bool GetShowTaskbarIcon() => _showTaskbarIcon;
+        public bool GetShowTaskbarWindowEnabled() => _showTaskbarWindow;
+
+        public bool GetExcludeOverlaysFromCaptureEnabled() => _excludeOverlaysFromCapture;
         public bool GetSettingsToolbarHidden() => _settingsToolbarHidden;
         public bool GetToolbarNetworkStatsEnabled() => _toolbarNetworkStatsEnabled;
         internal HotkeyBindings GetHotkeyBindings() => _hotkeys.Clone();
@@ -1665,6 +1678,13 @@ namespace ChessKit
             SettingChanged?.Invoke("BlitzMode", _blitzMode);
         }
 
+        private void ToggleBulletProfile()
+        {
+            _bulletProfileEnabled = !_bulletProfileEnabled;
+            SaveAppSettings();
+            SettingChanged?.Invoke("BulletProfile", _bulletProfileEnabled);
+        }
+
         private void ToggleHumanAdaptive()
         {
             _humanAdaptiveEnabled = !_humanAdaptiveEnabled;
@@ -1702,11 +1722,25 @@ namespace ChessKit
             SettingChanged?.Invoke("ShowTaskbarIcon", _showTaskbarIcon);
         }
 
+        private void ToggleShowTaskbarWindowSetting()
+        {
+            _showTaskbarWindow = !_showTaskbarWindow;
+            SaveAppSettings();
+            SettingChanged?.Invoke("ShowTaskbarWindow", _showTaskbarWindow);
+        }
+
         private void ToggleSettingsToolbarVisibilitySetting()
         {
             _settingsToolbarHidden = !_settingsToolbarHidden;
             SaveAppSettings();
             SettingChanged?.Invoke("SettingsToolbarHidden", _settingsToolbarHidden);
+        }
+
+        private void ToggleExcludeOverlaysFromCaptureSetting()
+        {
+            _excludeOverlaysFromCapture = !_excludeOverlaysFromCapture;
+            SaveAppSettings();
+            SettingChanged?.Invoke("ExcludeOverlaysFromCapture", _excludeOverlaysFromCapture);
         }
 
         private void ToggleToolbarNetworkStatsSetting()
@@ -1949,6 +1983,18 @@ namespace ChessKit
                         return;
                     }
 
+                    if (ShowBulletProfileRow)
+                    {
+                        var bulletProfileRect = GetBulletProfileCheckboxRect(speculativeSectionX, speculativeSectionY);
+                        if (bulletProfileRect.Contains(contentClickPos))
+                        {
+                            ToggleBulletProfile();
+                            Invalidate();
+                            m.Result = IntPtr.Zero;
+                            return;
+                        }
+                    }
+
                     var taskbarIconRect = GetTaskbarIconCheckboxRect();
                     if (taskbarIconRect.Contains(contentClickPos))
                     {
@@ -1956,6 +2002,18 @@ namespace ChessKit
                         Invalidate();
                         m.Result = IntPtr.Zero;
                         return;
+                    }
+
+                    if (ShowTaskbarWindowRow)
+                    {
+                        var taskbarWindowRect = GetShowTaskbarWindowCheckboxRect();
+                        if (taskbarWindowRect.Contains(contentClickPos))
+                        {
+                            ToggleShowTaskbarWindowSetting();
+                            Invalidate();
+                            m.Result = IntPtr.Zero;
+                            return;
+                        }
                     }
 
                     var toolbarVisibleRect = GetSettingsToolbarVisibilityCheckboxRect();
@@ -1971,6 +2029,15 @@ namespace ChessKit
                     if (networkStatsRect.Contains(contentClickPos))
                     {
                         ToggleToolbarNetworkStatsSetting();
+                        Invalidate();
+                        m.Result = IntPtr.Zero;
+                        return;
+                    }
+
+                    var captureExclusionRect = GetExcludeOverlaysFromCaptureCheckboxRect();
+                    if (captureExclusionRect.Contains(contentClickPos))
+                    {
+                        ToggleExcludeOverlaysFromCaptureSetting();
                         Invalidate();
                         m.Result = IntPtr.Zero;
                         return;
@@ -3558,6 +3625,28 @@ namespace ChessKit
             g.DrawString(_blitzMode.ToString(),
                 _labelFont, _textBrush, blitzButtonRect, centerFmt);
 
+            // --- Bullet profile row (40px, Licensed only): trades depth for
+            // MultiPV breadth so the reply cache covers ~10 opponent moves and
+            // arrows serve instantly on cache hits during bullet games. Hidden
+            // for Free (its prefetch cache is force-off, so the profile would
+            // only lower depth). ---
+            int noteTop = blitzRowTop + 40;
+            if (ShowBulletProfileRow)
+            {
+                var bulletCheckboxRect = GetBulletProfileCheckboxRect(x, y);
+                g.DrawRectangle(outlinePen, bulletCheckboxRect);
+                if (_bulletProfileEnabled)
+                {
+                    DrawCheckboxCheckmark(g, bulletCheckboxRect, Color.FromArgb(100, 200, 100));
+                }
+                var bulletLabelRect = new Rectangle(
+                    bulletCheckboxRect.Right + 10, blitzRowTop + 40,
+                    contentWidth - (bulletCheckboxRect.Right - contentX) - 10, 40);
+                g.DrawString("Bullet profile (fast arrows)",
+                    _labelFont, _textBrush, bulletLabelRect, rowFmt);
+                noteTop += 40;
+            }
+
             // --- Note row: small text, vertically centered in remaining space ---
             string noteText = _speculativeAnalysisMode switch
             {
@@ -3573,7 +3662,6 @@ namespace ChessKit
             };
             using var smallFont = new Font(_labelFont.FontFamily,
                 Math.Max(8.5f, _labelFont.Size - 0.7f), FontStyle.Regular);
-            int noteTop = blitzRowTop + 40;
             var speculativeRect = GetSpeculativeSectionRect();
             int noteHeight = speculativeRect.Bottom - noteTop - 8;
             var noteRect = new Rectangle(contentX, noteTop, contentWidth, noteHeight);
@@ -3617,6 +3705,22 @@ namespace ChessKit
             var taskbarLabelRect = new Rectangle(taskbarRect.Right + 10, y, contentWidth - 10, 40);
             g.DrawString("Show system tray icon on launch", _labelFont, _textBrush, taskbarLabelRect, rowFmt);
 
+            // --- Taskbar window row (40px, Licensed only): the minimized
+            // taskbar access window. Hidden for Free, where the window is a
+            // mandatory affordance; every row below shifts down with it. ---
+            if (ShowTaskbarWindowRow)
+            {
+                var taskbarWindowRect = GetShowTaskbarWindowCheckboxRect();
+                g.DrawRectangle(outlinePen, taskbarWindowRect);
+                if (_showTaskbarWindow)
+                {
+                    DrawCheckboxCheckmark(g, taskbarWindowRect, Color.FromArgb(100, 200, 100));
+                }
+
+                var taskbarWindowLabelRect = new Rectangle(taskbarWindowRect.Right + 10, y + 40, contentWidth - 10, 40);
+                g.DrawString("Show taskbar window", _labelFont, _textBrush, taskbarWindowLabelRect, rowFmt);
+            }
+
             var toolbarVisibleRect = GetSettingsToolbarVisibilityCheckboxRect();
             g.DrawRectangle(outlinePen, toolbarVisibleRect);
             if (!_settingsToolbarHidden)
@@ -3624,7 +3728,7 @@ namespace ChessKit
                 DrawCheckboxCheckmark(g, toolbarVisibleRect, Color.FromArgb(100, 200, 100));
             }
 
-            var toolbarVisibleLabelRect = new Rectangle(toolbarVisibleRect.Right + 10, y + 40, contentWidth - 10, 40);
+            var toolbarVisibleLabelRect = new Rectangle(toolbarVisibleRect.Right + 10, y + 40 + TaskbarWindowRowShift, contentWidth - 10, 40);
             g.DrawString("Keep settings bar visible", _labelFont, _textBrush, toolbarVisibleLabelRect, rowFmt);
 
             var networkStatsRect = GetToolbarNetworkStatsCheckboxRect();
@@ -3634,10 +3738,23 @@ namespace ChessKit
                 DrawCheckboxCheckmark(g, networkStatsRect, Color.FromArgb(100, 200, 100));
             }
 
-            var networkStatsLabelRect = new Rectangle(networkStatsRect.Right + 10, y + 80, contentWidth - 10, 40);
+            var networkStatsLabelRect = new Rectangle(networkStatsRect.Right + 10, y + 80 + TaskbarWindowRowShift, contentWidth - 10, 40);
             g.DrawString("Show network stats beside ping", _labelFont, _textBrush, networkStatsLabelRect, rowFmt);
 
-            int buttonRowTop = y + 124;
+            // --- Capture-exclusion row (40px, both editions): hides the arrow/
+            // eval/engine-lines overlays from screen capture. Every button row
+            // below shifts down by CaptureExclusionRowShift (always on). ---
+            var captureExclusionRect = GetExcludeOverlaysFromCaptureCheckboxRect();
+            g.DrawRectangle(outlinePen, captureExclusionRect);
+            if (_excludeOverlaysFromCapture)
+            {
+                DrawCheckboxCheckmark(g, captureExclusionRect, Color.FromArgb(100, 200, 100));
+            }
+
+            var captureExclusionLabelRect = new Rectangle(captureExclusionRect.Right + 10, y + 120 + TaskbarWindowRowShift, contentWidth - 10, 40);
+            g.DrawString("Hide overlays from screen capture", _labelFont, _textBrush, captureExclusionLabelRect, rowFmt);
+
+            int buttonRowTop = y + 124 + TaskbarWindowRowShift + CaptureExclusionRowShift;
             var keyButtonRect = GetKeyBindingsButtonRect();
             DrawAppActionButton(g, keyButtonRect, buttonBorderPen, _hoveredAppAction == "keys");
             g.DrawString("Key Bindings", _labelFont, _textBrush, keyButtonRect, centerFmt);
@@ -4133,6 +4250,47 @@ namespace ChessKit
             return new Rectangle(btnX, btnY, LowerButtonWidth, LowerButtonHeight);
         }
 
+        // The Bullet profile row exists only for Licensed sessions: the
+        // speculative prefetch/PV cache it widens is force-off for Free, so
+        // the profile would only lower depth there. Runtime property (not a
+        // cached bool) because the edition can flip mid-session when the
+        // license verifies; every layout/draw/hit-test call re-evaluates.
+        private static bool ShowBulletProfileRow => !BuildLimits.IsFreeEdition;
+
+        private Rectangle GetBulletProfileCheckboxRect(int x, int y)
+        {
+            // One full 40px row below the Blitz row; same checkbox geometry
+            // as the speculative enable row.
+            int cy = y + 120 + (40 - LowerCheckboxSize) / 2;
+            int cx = x + SpeculativeContentIndent;
+            return new Rectangle(cx, cy, LowerCheckboxSize, LowerCheckboxSize);
+        }
+
+        // The "Show taskbar window" row exists only for Licensed sessions: the
+        // Free Edition's taskbar window is a mandatory affordance (upsell +
+        // quick actions), so Free never gets to hide it. Runtime property (not
+        // a cached bool) for the same reason as ShowBulletProfileRow: the
+        // edition can flip mid-session when the license verifies.
+        private static bool ShowTaskbarWindowRow => !BuildLimits.IsFreeEdition;
+
+        // Extra Y consumed by the taskbar-window row: every app-section row
+        // below the tray-icon row shifts down by one 40px row when visible.
+        private static int TaskbarWindowRowShift => ShowTaskbarWindowRow ? ExpandedRowHeight : 0;
+
+        // The capture-exclusion row is shown in BOTH editions (stream-safety +
+        // feedback-prevention benefit everyone), so it is an always-on 40px
+        // shift applied to the button rows and the section height. It sits one
+        // row below the network-stats row.
+        private const int CaptureExclusionRowShift = ExpandedRowHeight;
+
+        private Rectangle GetExcludeOverlaysFromCaptureCheckboxRect()
+        {
+            var appRect = GetAppSectionRect();
+            int x = appRect.X + 18 + SpeculativeContentIndent;
+            int y = appRect.Y + 50 + 120 + TaskbarWindowRowShift + (40 - LowerCheckboxSize) / 2;
+            return new Rectangle(x, y, LowerCheckboxSize, LowerCheckboxSize);
+        }
+
         private Rectangle GetTaskbarIconCheckboxRect()
         {
             var appRect = GetAppSectionRect();
@@ -4141,11 +4299,20 @@ namespace ChessKit
             return new Rectangle(x, y, LowerCheckboxSize, LowerCheckboxSize);
         }
 
+        private Rectangle GetShowTaskbarWindowCheckboxRect()
+        {
+            // One full 40px row below the tray-icon row (Licensed only).
+            var appRect = GetAppSectionRect();
+            int x = appRect.X + 18 + SpeculativeContentIndent;
+            int y = appRect.Y + 50 + 40 + (40 - LowerCheckboxSize) / 2;
+            return new Rectangle(x, y, LowerCheckboxSize, LowerCheckboxSize);
+        }
+
         private Rectangle GetSettingsToolbarVisibilityCheckboxRect()
         {
             var appRect = GetAppSectionRect();
             int x = appRect.X + 18 + SpeculativeContentIndent;
-            int y = appRect.Y + 50 + 40 + (40 - LowerCheckboxSize) / 2;
+            int y = appRect.Y + 50 + 40 + TaskbarWindowRowShift + (40 - LowerCheckboxSize) / 2;
             return new Rectangle(x, y, LowerCheckboxSize, LowerCheckboxSize);
         }
 
@@ -4153,7 +4320,7 @@ namespace ChessKit
         {
             var appRect = GetAppSectionRect();
             int x = appRect.X + 18 + SpeculativeContentIndent;
-            int y = appRect.Y + 50 + 80 + (40 - LowerCheckboxSize) / 2;
+            int y = appRect.Y + 50 + 80 + TaskbarWindowRowShift + (40 - LowerCheckboxSize) / 2;
             return new Rectangle(x, y, LowerCheckboxSize, LowerCheckboxSize);
         }
 
@@ -4161,7 +4328,7 @@ namespace ChessKit
         {
             var appRect = GetAppSectionRect();
             int x = appRect.X + 18 + SpeculativeContentIndent;
-            int y = appRect.Y + 50 + 124;
+            int y = appRect.Y + 50 + 124 + TaskbarWindowRowShift + CaptureExclusionRowShift;
             return new Rectangle(x, y, 150, LowerButtonHeight);
         }
 
@@ -4169,7 +4336,7 @@ namespace ChessKit
         {
             var appRect = GetAppSectionRect();
             int x = appRect.X + 18 + SpeculativeContentIndent;
-            int y = appRect.Y + 50 + 164;
+            int y = appRect.Y + 50 + 164 + TaskbarWindowRowShift + CaptureExclusionRowShift;
             return new Rectangle(x, y, 150, LowerButtonHeight);
         }
 
@@ -4177,7 +4344,7 @@ namespace ChessKit
         {
             var appRect = GetAppSectionRect();
             int x = appRect.X + 18 + SpeculativeContentIndent;
-            int y = appRect.Y + 50 + 204;
+            int y = appRect.Y + 50 + 204 + TaskbarWindowRowShift + CaptureExclusionRowShift;
             return new Rectangle(x, y, 150, LowerButtonHeight);
         }
 
@@ -4185,7 +4352,7 @@ namespace ChessKit
         {
             var appRect = GetAppSectionRect();
             int x = appRect.X + 18 + SpeculativeContentIndent;
-            int y = appRect.Y + 50 + 324;
+            int y = appRect.Y + 50 + 324 + TaskbarWindowRowShift + CaptureExclusionRowShift;
             return new Rectangle(x, y, 150, LowerButtonHeight);
         }
 
@@ -4193,7 +4360,7 @@ namespace ChessKit
         {
             var appRect = GetAppSectionRect();
             int x = appRect.X + 18 + SpeculativeContentIndent;
-            int y = appRect.Y + 50 + 244;
+            int y = appRect.Y + 50 + 244 + TaskbarWindowRowShift + CaptureExclusionRowShift;
             return new Rectangle(x, y, 150, LowerButtonHeight);
         }
 
@@ -4201,7 +4368,7 @@ namespace ChessKit
         {
             var appRect = GetAppSectionRect();
             int x = appRect.X + 18 + SpeculativeContentIndent;
-            int y = appRect.Y + 50 + 284;
+            int y = appRect.Y + 50 + 284 + TaskbarWindowRowShift + CaptureExclusionRowShift;
             return new Rectangle(x, y, 150, LowerButtonHeight);
         }
 
@@ -4233,13 +4400,20 @@ namespace ChessKit
         private Rectangle GetSpeculativeSectionRect()
         {
             var analysisRect = GetAnalysisSectionRect();
-            return new Rectangle(analysisRect.X, analysisRect.Bottom + ExpandedSectionGap, analysisRect.Width, SpeculativeSectionHeight);
+            // The Bullet profile row adds one 40px row when visible; the note
+            // block keeps its height because everything below shifts with it.
+            int height = SpeculativeSectionHeight + (ShowBulletProfileRow ? ExpandedRowHeight : 0);
+            return new Rectangle(analysisRect.X, analysisRect.Bottom + ExpandedSectionGap, analysisRect.Width, height);
         }
 
         private Rectangle GetAppSectionRect()
         {
             var speculativeRect = GetSpeculativeSectionRect();
-            return new Rectangle(speculativeRect.X, speculativeRect.Bottom + ExpandedSectionGap, speculativeRect.Width, AppSectionHeight);
+            // The taskbar-window row adds one 40px row when visible (Licensed
+            // only); the capture-exclusion row adds one always (both editions).
+            // Everything below each shifts down by the same amount.
+            int height = AppSectionHeight + TaskbarWindowRowShift + CaptureExclusionRowShift;
+            return new Rectangle(speculativeRect.X, speculativeRect.Bottom + ExpandedSectionGap, speculativeRect.Width, height);
         }
 
         private Rectangle GetSliderTrackRect(int sliderIndex)

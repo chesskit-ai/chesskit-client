@@ -47,6 +47,13 @@ namespace ChessKit
         public static int MaxDepth => 32;
         public static bool AllowInfiniteAnalysis => true;
         public static int MaxLines => 6;
+        // Engine-side MultiPV ceiling, intentionally WIDER than MaxLines (the
+        // display slider cap): the Bullet profile requests extra lines purely
+        // to feed the PV-continuation cache with plausible opponent replies -
+        // nothing above MaxLines is ever displayed. Every client-side MultiPV
+        // clamp (remote request, setoption capture, info-line parsers) must
+        // use this, not MaxLines, or the extra lines silently vanish.
+        public const int MaxEnginePvLines = 10;
         public static int MaxThreads => IsFreeEdition ? 4 : 16;
         public static int MaxHashMb => IsFreeEdition ? 128 : 1024;
         // The Free move cap is now governed by the SERVER (a per-HWID move-count

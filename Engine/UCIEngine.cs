@@ -967,7 +967,7 @@ namespace ChessKit
                 if (pvMatch.Success)
                     pv = int.Parse(pvMatch.Groups[1].Value);
 
-                if (pv is < 1 or > 5)
+                if (pv is < 1 or > BuildLimits.MaxEnginePvLines)
                     continue;
 
                 if (!latestLinesByPv.TryGetValue(pv, out var existing) || depth >= existing.Depth)
@@ -1637,7 +1637,7 @@ namespace ChessKit
                 if (!pvMatch.Success) continue;
 
                 int pvNum = int.Parse(pvMatch.Groups[1].Value);
-                if (pvNum > 5) continue;
+                if (pvNum > BuildLimits.MaxEnginePvLines) continue;
 
                 if (variations.ContainsKey(pvNum))
                     continue;
@@ -2098,7 +2098,7 @@ namespace ChessKit
 
             if (optionName.Equals("MultiPV", StringComparison.OrdinalIgnoreCase))
             {
-                _optionMultiPv = Math.Clamp(numericValue, 1, BuildLimits.MaxLines);
+                _optionMultiPv = Math.Clamp(numericValue, 1, BuildLimits.MaxEnginePvLines);
             }
             else if (optionName.Equals("Threads", StringComparison.OrdinalIgnoreCase))
             {

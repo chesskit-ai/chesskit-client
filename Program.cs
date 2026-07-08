@@ -21,6 +21,12 @@ partial class Program
 
         bool createdNew = false;
 
+        // Last-resort crash capture: a fatal exception on any thread (incl. the
+        // overlay UI thread and background tasks) is written to the runtime log
+        // + a dedicated crash.log before the process dies, so a "did it crash or
+        // did I close it" question is answerable from the logs. Best-effort only.
+        InstallGlobalCrashHandlers();
+
         try
         {
 #if DEBUG
@@ -144,6 +150,10 @@ partial class Program
                 _settingsToolbar.SyncBoardFlippedState(_boardIsFlipped);
                 _settingsToolbar.SyncCoachModeState(_settingsToolbar.GetCoachModeEnabled());
                 _settingsToolbar.SyncSettingsToolbarHiddenState(_settingsToolbarHidden);
+                // Apply the persisted capture-exclusion preference to the just-
+                // created overlay surfaces (they register with CaptureExclusion
+                // defaulting ON; this honors a saved OFF). See CaptureExclusion.
+                CaptureExclusion.SetEnabled(_settingsToolbar.GetExcludeOverlaysFromCaptureEnabled());
                 _hotkeyController!.Bindings = _settingsToolbar.GetHotkeyBindings();
                 _hotkeyController.WireRegisteredListener();
                 bool showSystemTrayIcon = _settingsToolbar.GetShowTaskbarIcon();
@@ -259,6 +269,26 @@ partial class Program
                 _speculativeAnalysisEnabled = _settingsToolbar.GetSpeculativeAnalysisEnabled();
                 _speculativeAnalysisMode = _settingsToolbar.GetSpeculativeAnalysisMode();
                 _blitzModeSetting = _settingsToolbar.GetBlitzMode();
+                // Free never runs the Bullet profile: the prefetch/PV cache it
+                // exists to widen is force-off for Free (SpeculativePrefetchActive),
+                // so honoring a persisted flag would only lower depth.
+                _bulletProfileEnabled = !BuildLimits.IsFreeEdition && _settingsToolbar.GetBulletProfileEnabled();
+                // Mid-session Free -> Licensed upgrade (background monitor):
+                // re-apply a persisted Bullet profile through the normal settings
+                // path, otherwise the toolbar row appears (runtime-gated) with a
+                // checked-but-inert checkbox. Raised on a worker thread -
+                // marshal via the overlay like the license prompt does.
+                _licenseEnforcer!.LicenseUpgraded += () =>
+                {
+                    try
+                    {
+                        if (_settingsToolbar?.GetBulletProfileEnabled() == true && _overlay != null)
+                        {
+                            _overlay.BeginInvoke(new Action(() => HandleSettingChanged("BulletProfile", true)));
+                        }
+                    }
+                    catch { }
+                };
                 _evalDisplayMode = _settingsToolbar.GetEvalDisplayMode();
                 _evalBar?.SetDisplayMode(_evalDisplayMode);
             }
@@ -347,7 +377,11 @@ partial class Program
                             {
                                 bool iconic = WindowTracker.IsIconic(_lostHwndCache);
                                 bool visible = WindowTracker.IsWindowVisible(_lostHwndCache);
-                                bool trackable = !iconic && visible;
+                                // Cloak-aware like IsTrackable: a window on another
+                                // virtual desktop reads !iconic && visible, and the
+                                // 300ms slow path would re-acquire it and re-show
+                                // overlays on the WRONG desktop in a ~3Hz loop.
+                                bool trackable = !iconic && visible && !WindowTracker.IsCloaked(_lostHwndCache);
 
                                 // Log every OS-state transition while latch
                                 // is set so we can see what the browser is
@@ -396,12 +430,12 @@ partial class Program
                                         // cached arrows again. This avoids a brief
                                         // flash at stale coordinates after heavy
                                         // window switching/minimize stress.
-                                        _arrowDisplayGeneration++;
+                                        // Interlocked: the WinEvent hook thread also
+                                        // bumps this generation (HideOverlaysVisually).
+                                        Interlocked.Increment(ref _arrowDisplayGeneration);
                                         Interlocked.Increment(ref _arrowRenderToken);
                                         _showingMoves = false;
-                                        try { _evalBar?.SetBoardVisible(true); } catch { }
-                                        try { _engineLines?.SetBoardVisible(true); } catch { }
-                                        try { _settingsToolbar?.SetBoardVisible(true); } catch { }
+                                        ShowOverlaysForTrackedWindow();
                                         // Position the toolbar on top of the
                                         // restored window so it's visible
                                         // immediately, not after vision runs.
@@ -453,12 +487,10 @@ partial class Program
                                             // restored board has been verified by
                                             // vision. Otherwise old coordinates can
                                             // flash for a frame under stress.
-                                            _arrowDisplayGeneration++;
+                                            Interlocked.Increment(ref _arrowDisplayGeneration);
                                             Interlocked.Increment(ref _arrowRenderToken);
                                             _showingMoves = false;
-                                            try { _evalBar?.SetBoardVisible(true); } catch { }
-                                            try { _engineLines?.SetBoardVisible(true); } catch { }
-                                            try { _settingsToolbar?.SetBoardVisible(true); } catch { }
+                                            ShowOverlaysForTrackedWindow();
                                             if (_settingsToolbar != null)
                                             {
                                                 _settingsToolbar.UpdateWindowPosition(new Rectangle(
@@ -624,6 +656,7 @@ partial class Program
 
                             // Skip the rest of detection but still count frame
                             _frameCount++;
+                            CheckPendingRawHideFuse();
                             UpdatePerformanceMetrics();
 
                             var menuFrameTime = _perfStopwatch.ElapsedMilliseconds - frameStart;
@@ -743,9 +776,7 @@ partial class Program
                                         _requestBoardRefresh = true;
                                     }
 
-                                    _evalBar?.SetBoardVisible(true);
-                                    _engineLines?.SetBoardVisible(true);
-                                    _settingsToolbar?.SetBoardVisible(true);
+                                    MaybeShowOverlaysOnHealthyTrack();
 
                                     if (windowResizing0)
                                     {
@@ -778,9 +809,7 @@ partial class Program
                                     _lastTrackedBox = projected;
                                     _lastWindowRect = winRect;
                                     _boardLostFrames = 0;
-                                    _evalBar?.SetBoardVisible(true);
-                                    _engineLines?.SetBoardVisible(true);
-                                    _settingsToolbar?.SetBoardVisible(true);
+                                    MaybeShowOverlaysOnHealthyTrack();
                                     if (_overlay != null && _showingMoves)
                                     {
                                         _overlay.BeginInvoke(new Action(() =>
@@ -799,10 +828,9 @@ partial class Program
                                     _lastWindowRect = winRect;
                                     _boardLostFrames = 0;
 
-                                    // Tell forms that board is visible (idempotent).
-                                    _evalBar?.SetBoardVisible(true);
-                                    _engineLines?.SetBoardVisible(true);
-                                    _settingsToolbar?.SetBoardVisible(true);
+                                    // Tell forms that board is visible (idempotent,
+                                    // suppression-gated during minimize races).
+                                    MaybeShowOverlaysOnHealthyTrack();
 
                                     windowTrackHandledFrame = true;
                                 }
@@ -1192,6 +1220,13 @@ partial class Program
                                                     Math.Abs(detectedOffset.Y - _boardOffsetInWindow.Y) > jitterThreshold ||
                                                     Math.Abs(detectedOffset.Width - _boardOffsetInWindow.Width) > jitterThreshold ||
                                                     Math.Abs(detectedOffset.Height - _boardOffsetInWindow.Height) > jitterThreshold;
+                                                // A verify whose reading matches the cached offset
+                                                // invalidates any pending minor shift: the previous
+                                                // divergent reading was the outlier, not the cache.
+                                                if (!offsetChanged)
+                                                {
+                                                    _pendingMinorBoardOffset = null;
+                                                }
                                                 if (offsetChanged)
                                                 {
                                                     int shiftDx = Math.Abs(detectedOffset.X - _boardOffsetInWindow.X);
@@ -1203,6 +1238,36 @@ partial class Program
                                                         shiftDy > 16 ||
                                                         shiftDw > 12 ||
                                                         shiftDh > 12;
+
+                                                    // VERIFY-CONSISTENCY DAMPING for minor shifts: the
+                                                    // periodic vision verify can alternate between two
+                                                    // near-identical board readings (e.g. a border edge
+                                                    // in/out of the box at q58 under compression) with
+                                                    // the window completely static. Committing every
+                                                    // flip-flop moved the arrow anchor a few px on each
+                                                    // verify - user-visible as arrows flickering between
+                                                    // two positions. A minor shift is only committed when
+                                                    // the NEXT verify reproduces it; major shifts (real
+                                                    // layout changes) keep committing immediately.
+                                                    if (!majorOffsetShift)
+                                                    {
+                                                        bool confirmsPending =
+                                                            _pendingMinorBoardOffset.HasValue &&
+                                                            Math.Abs(detectedOffset.X - _pendingMinorBoardOffset.Value.X) <= jitterThreshold &&
+                                                            Math.Abs(detectedOffset.Y - _pendingMinorBoardOffset.Value.Y) <= jitterThreshold &&
+                                                            Math.Abs(detectedOffset.Width - _pendingMinorBoardOffset.Value.Width) <= jitterThreshold &&
+                                                            Math.Abs(detectedOffset.Height - _pendingMinorBoardOffset.Value.Height) <= jitterThreshold;
+                                                        if (!confirmsPending)
+                                                        {
+                                                            _pendingMinorBoardOffset = detectedOffset;
+                                                            // Always logged (rare event): the offset trail is
+                                                            // the evidence for diagnosing which model/state
+                                                            // produces misaligned anchors in the field.
+                                                            Log($"[WINTRACK] minor offset shift pending re-confirmation: ({detectedOffset.X},{detectedOffset.Y}) {detectedOffset.Width}x{detectedOffset.Height} vs cached ({_boardOffsetInWindow.X},{_boardOffsetInWindow.Y}) {_boardOffsetInWindow.Width}x{_boardOffsetInWindow.Height}");
+                                                            goto offsetShiftDeferred;
+                                                        }
+                                                    }
+                                                    _pendingMinorBoardOffset = null;
 
                                                     _boardOffsetInWindow = detectedOffset;
                                                     UpdateBoardWindowProjection(detectedBoardRect, winRect);
@@ -1217,16 +1282,14 @@ partial class Program
                                                         _invalidFenFrames = 0;
                                                         ClearExternalArrows();
                                                     }
-                                                    if (_diagLoggingEnabled)
-                                                    {
-                                                        string severity = majorOffsetShift ? "major" : "minor";
-                                                        LogDiag("WINTRACK", $"Offset shifted ({severity}): ({_boardOffsetInWindow.X},{_boardOffsetInWindow.Y}) {_boardOffsetInWindow.Width}x{_boardOffsetInWindow.Height}");
-                                                    }
+                                                    // Always logged (rare event) - see the pending-shift log.
+                                                    Log($"[WINTRACK] Offset shifted ({(majorOffsetShift ? "major" : "minor")}): ({_boardOffsetInWindow.X},{_boardOffsetInWindow.Y}) {_boardOffsetInWindow.Width}x{_boardOffsetInWindow.Height} dx={shiftDx} dy={shiftDy} dw={shiftDw} dh={shiftDh}");
                                                 }
                                                 else if (!HasUsableBoardWindowProjection())
                                                 {
                                                     UpdateBoardWindowProjection(detectedBoardRect, winRect);
                                                 }
+                                            offsetShiftDeferred: ;
                                             }
                                         }
                                     }
@@ -1246,9 +1309,8 @@ partial class Program
                                 }
 
                                 // Tell forms that board is visible
-                                _evalBar?.SetBoardVisible(true);
-                                _engineLines?.SetBoardVisible(true);
-                                _settingsToolbar?.SetBoardVisible(true);
+                                // (suppression-gated during minimize races).
+                                MaybeShowOverlaysOnHealthyTrack();
                             }
                             else
                             {
@@ -1412,7 +1474,21 @@ partial class Program
                             }
                             else if (!forceGateFenProbe && ShouldPauseFenDetectionForMouseInteraction())
                             {
-                                ResetPendingFenCandidate();
+                                // Preserve a pending candidate that is already a
+                                // clean legal transition from the current position:
+                                // that's the OPPONENT's move caught mid-confirm when
+                                // the user grabbed a piece to reply. Resetting it
+                                // every paused frame forced the whole confirm to
+                                // restart after mouse-up - the measured "own move
+                                // waits for the opponent backlog" stall (~600ms).
+                                // Anything not legally bridgeable is still dropped:
+                                // mid-drag pixel noise must not survive the pause.
+                                if (!(_pendingFenCandidateCount > 0 &&
+                                      !string.IsNullOrEmpty(_pendingFenCandidate) &&
+                                      CanFastConfirmLegalExternalFen(_pendingFenCandidate, out _)))
+                                {
+                                    ResetPendingFenCandidate();
+                                }
                                 _invalidFenFrames = 0;
                             }
                             else
@@ -1829,6 +1905,7 @@ partial class Program
                             }
 
                             MaybeRecoverStableSparseArrows();
+                            ReconcileExternalArrowOverlay();
                         }
                         phase2End = _perfStopwatch.ElapsedMilliseconds;
                         phase2Ms = phase2End - phase2Start;
@@ -1839,6 +1916,7 @@ partial class Program
                     {
                         _frameCount++;
                     }
+                    CheckPendingRawHideFuse();
                     UpdatePerformanceMetrics();
 
 #if DEBUG

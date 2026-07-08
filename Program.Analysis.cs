@@ -335,6 +335,10 @@ partial class Program
 
         var arrows = new List<MoveArrow>();
         int strength = 1;
+        // Display cap stays at 5/_maxArrowCount even when the Bullet profile
+        // requests MultiPV 10 - lines beyond the cap feed the PV cache
+        // (PopulateAnalysisPvCache sees the full variation list), not the
+        // screen.
         int arrowsToShow = Math.Min(_maxArrowCount, Math.Min(displayVariations.Count, 5));
 
         foreach (var variation in displayVariations.Take(arrowsToShow))
@@ -1945,7 +1949,10 @@ partial class Program
 
     private static async Task EnsureLiveAnalysisMultiPvAsync(UCIEngine engine, int desiredMultiPv)
     {
-        desiredMultiPv = BuildLimits.ClampLines(desiredMultiPv);
+        // MaxEnginePvLines, NOT ClampLines/MaxLines: the Bullet profile asks
+        // for more lines than the display cap to feed the PV cache; clamping
+        // to the display cap here would silently re-assert 6 and undo it.
+        desiredMultiPv = Math.Clamp(desiredMultiPv, 1, BuildLimits.MaxEnginePvLines);
         if (desiredMultiPv <= 0)
             desiredMultiPv = 1;
 
@@ -2199,6 +2206,10 @@ partial class Program
         if (!_speculativePrefetchCache.TryGetValue(key, out var entry))
         {
             ArrowTimeline.Log("PREFETCH_MISS", fen: capturedFEN, extra: $"key={key}");
+            // Dedicated Bullet-profile hit-rate telemetry: the profile's whole
+            // value is cache coverage, so make its hits/misses greppable.
+            if (_bulletProfileEnabled)
+                ArrowTimeline.Log("BULLET", fen: capturedFEN, extra: "prefetch-cache MISS");
             return false;
         }
 
@@ -2206,6 +2217,8 @@ partial class Program
         {
             _speculativePrefetchCache.TryRemove(key, out _);
             ArrowTimeline.Log("PREFETCH_MISS", fen: capturedFEN, extra: "stale");
+            if (_bulletProfileEnabled)
+                ArrowTimeline.Log("BULLET", fen: capturedFEN, extra: "prefetch-cache MISS (stale)");
             return false;
         }
 
@@ -2238,6 +2251,8 @@ partial class Program
             return false;
 
         ArrowTimeline.Log("PREFETCH_HIT", fen: capturedFEN, depth: entry.Depth, extra: $"key={key}");
+        if (_bulletProfileEnabled)
+            ArrowTimeline.Log("BULLET", fen: capturedFEN, depth: entry.Depth, extra: "prefetch-cache HIT");
         // Skip the wire entirely when the cached answer is already at least as
         // deep as requested; otherwise the arrows are showing now and the wire
         // runs only to refine.

@@ -3,15 +3,17 @@ using System.Drawing.Drawing2D;
 namespace ChessKit
 {
     /// <summary>
-    /// Owns the Free Edition taskbar access window: a minimized helper form that
-    /// lives in the Windows taskbar so Free users always have a way back to the
-    /// app's core actions even when the floating toolbar is hidden. It is
-    /// DPI-aware (AutoScaleMode.Dpi) and styled to match the rest of the app,
-    /// with a prominent Upgrade call-to-action plus a grid of quick actions.
-    /// It talks to the rest of the app only through the delegates injected at
-    /// construction time.
+    /// Owns the app's taskbar access window: a minimized helper form that lives
+    /// in the Windows taskbar so users always have a way back to the app's core
+    /// actions even when the floating toolbar is hidden. Both editions use it.
+    /// Free: always shown (a mandatory affordance) with a prominent Upgrade
+    /// call-to-action and benefits subtitle. Licensed: shown by default, can go
+    /// tray-only via the "Show taskbar window" setting; its layout drops the
+    /// upsell rows. It is DPI-aware (AutoScaleMode.Dpi) and styled to match the
+    /// rest of the app, with a grid of quick actions. It talks to the rest of
+    /// the app only through the delegates injected at construction time.
     /// </summary>
-    public sealed class FreeEditionWindow : IDisposable
+    public sealed class TaskbarWindow : IDisposable
     {
         private readonly Action _onShowToolbar;
         private readonly Action _onOpenAnalysisBoard;
@@ -36,7 +38,7 @@ namespace ChessKit
         private static readonly Color TextColor    = Color.White;
         private static readonly Color SubtleColor  = Color.FromArgb(166, 166, 174);
 
-        public FreeEditionWindow(
+        public TaskbarWindow(
             Action onShowToolbar,
             Action onOpenAnalysisBoard,
             Action onToggleOverlay,
@@ -65,6 +67,14 @@ namespace ChessKit
             if (_window != null && !_window.IsDisposed)
                 return;
 
+            // Edition is captured once at build time so the layout stays
+            // self-consistent: Free carries the upsell rows (Upgrade button +
+            // benefits subtitle), Licensed drops them and shrinks the window so
+            // no dead gap is left. A mid-session Free -> Licensed upgrade keeps
+            // an already-built Free window as-is; a half-relabeled window (FULL
+            // chip above an Upgrade button) would be worse than a stale one.
+            bool isFreeEdition = BuildLimits.IsFreeEdition;
+
             var form = new Form
             {
                 Text = "Chess Kit",
@@ -74,7 +84,8 @@ namespace ChessKit
                 FormBorderStyle = FormBorderStyle.FixedDialog,
                 MaximizeBox = false,
                 MinimizeBox = true,
-                ClientSize = new Size(460, 466),
+                // Licensed drops the 50px upgrade row and the ~26px subtitle row.
+                ClientSize = new Size(460, isFreeEdition ? 466 : 390),
                 BackColor = BgColor,
                 ForeColor = TextColor,
                 Font = new Font("Segoe UI", 9.75f, FontStyle.Regular)
@@ -85,30 +96,38 @@ namespace ChessKit
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 1,
-                RowCount = 7,
+                RowCount = isFreeEdition ? 7 : 5,
                 BackColor = BgColor,
                 Padding = new Padding(26, 18, 26, 14)
             };
             root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 50f));   // 0 header
-            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));        // 1 hint (content-sized so it never clips at high DPI)
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 50f));   // 2 upgrade
-            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));        // 3 subtitle (content-sized so it never clips at high DPI)
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 192f));  // 4 grid
-            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));   // 5 spacer
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 48f));   // 6 footer
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 50f));   // header
+            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));        // hint (content-sized so it never clips at high DPI)
 
-            root.Controls.Add(BuildHeader(), 0, 0);
+            root.Controls.Add(BuildHeader(isFreeEdition), 0, 0);
             root.Controls.Add(BuildHint(), 0, 1);
 
-            var upgrade = CreateButton("Upgrade to Full", _onUpgrade, primary: true);
-            upgrade.Margin = new Padding(2, 2, 2, 2);
-            root.Controls.Add(upgrade, 0, 2);
+            int row = 2;
+            if (isFreeEdition)
+            {
+                // Free-only upsell rows.
+                root.RowStyles.Add(new RowStyle(SizeType.Absolute, 50f));   // upgrade
+                root.RowStyles.Add(new RowStyle(SizeType.AutoSize));        // subtitle (content-sized so it never clips at high DPI)
 
-            root.Controls.Add(BuildSubtitle(), 0, 3);
-            root.Controls.Add(BuildActionGrid(), 0, 4);
-            root.Controls.Add(new Panel { Dock = DockStyle.Fill, BackColor = BgColor, Margin = new Padding(0) }, 0, 5);
-            root.Controls.Add(BuildFooter(), 0, 6);
+                var upgrade = CreateButton("Upgrade to Full", _onUpgrade, primary: true);
+                upgrade.Margin = new Padding(2, 2, 2, 2);
+                root.Controls.Add(upgrade, 0, row++);
+
+                root.Controls.Add(BuildSubtitle(), 0, row++);
+            }
+
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 192f));  // grid
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));   // spacer
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 48f));   // footer
+
+            root.Controls.Add(BuildActionGrid(), 0, row++);
+            root.Controls.Add(new Panel { Dock = DockStyle.Fill, BackColor = BgColor, Margin = new Padding(0) }, 0, row++);
+            root.Controls.Add(BuildFooter(), 0, row);
 
             form.Controls.Add(root);
 
@@ -126,7 +145,32 @@ namespace ChessKit
             form.Show();
         }
 
-        private static Control BuildHeader()
+        /// <summary>
+        /// Shows or hides the taskbar window at runtime (driven by the Licensed
+        /// "Show taskbar window" setting). Idempotent and safe if the form was
+        /// never created: showing lazily builds it, hiding a non-existent window
+        /// is a no-op. A re-show keeps the minimized-to-taskbar presentation.
+        /// </summary>
+        public void SetVisible(bool visible)
+        {
+            if (visible)
+            {
+                if (_window == null || _window.IsDisposed)
+                {
+                    Initialize();
+                    return;
+                }
+
+                _window.WindowState = FormWindowState.Minimized;
+                _window.Show();
+            }
+            else if (_window != null && !_window.IsDisposed)
+            {
+                _window.Hide();
+            }
+        }
+
+        private static Control BuildHeader(bool isFreeEdition)
         {
             var header = new Panel { Dock = DockStyle.Fill, BackColor = BgColor, Margin = new Padding(0) };
             header.Paint += (_, e) =>
@@ -137,7 +181,7 @@ namespace ChessKit
                 using var titleFont = new Font("Segoe UI Semibold", 18f, FontStyle.Bold);
                 using var chipFont = new Font("Segoe UI Semibold", 8.5f, FontStyle.Bold);
                 const string title = "ChessKit";
-                const string chip = "FREE";
+                string chip = isFreeEdition ? "FREE" : "FULL";
                 SizeF titleSize = g.MeasureString(title, titleFont);
                 SizeF chipTextSize = g.MeasureString(chip, chipFont);
                 int gap = Dpi.Scale(header, 11);
@@ -150,10 +194,11 @@ namespace ChessKit
                     g.DrawString(title, titleFont, titleBrush, startX, midY - titleSize.Height / 2f);
                 var chipRect = new Rectangle(startX + (int)Math.Ceiling(titleSize.Width) + gap, midY - chipH / 2, chipW, chipH);
                 using (var chipPath = RoundedRect(chipRect, chipH / 2))
-                using (var chipBrush = new SolidBrush(AmberColor))
+                using (var chipBrush = new SolidBrush(isFreeEdition ? AmberColor : AccentColor))
                     g.FillPath(chipBrush, chipPath);
                 using var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-                using (var chipTextBrush = new SolidBrush(Color.FromArgb(30, 24, 6)))
+                // Dark text on the amber FREE chip, white on the blue FULL chip.
+                using (var chipTextBrush = new SolidBrush(isFreeEdition ? Color.FromArgb(30, 24, 6) : TextColor))
                     g.DrawString(chip, chipFont, chipTextBrush, chipRect, fmt);
             };
             return header;

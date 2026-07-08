@@ -230,9 +230,7 @@ partial class Program
         _boardLostFrames = 0;
         _boardContentLostFrames = 0;
 
-        _evalBar?.SetBoardVisible(true);
-        _engineLines?.SetBoardVisible(true);
-        _settingsToolbar?.SetBoardVisible(true);
+        MaybeShowOverlaysOnHealthyTrack();
         if (_overlay != null && _showingMoves)
         {
             _overlay.BeginInvoke(new Action(() =>
@@ -912,7 +910,7 @@ partial class Program
         try { CancelPendingAnalysis(reason); } catch { }
         CancelStaticLastMoveHighlightInitialHold();
 
-        _arrowDisplayGeneration++;
+        Interlocked.Increment(ref _arrowDisplayGeneration);
         _currentMoveArrows = null;
         _lastAnalysisVariations = null;
         _lastArrowSourceFEN = "";
@@ -1050,7 +1048,7 @@ partial class Program
         try { CancelPendingAnalysis($"board relocated inside tracked window ({reason})"); } catch { }
         CancelStaticLastMoveHighlightInitialHold();
 
-        _arrowDisplayGeneration++;
+        Interlocked.Increment(ref _arrowDisplayGeneration);
         _currentMoveArrows = null;
         _lastAnalysisVariations = null;
         _lastArrowSourceFEN = "";
@@ -1077,9 +1075,7 @@ partial class Program
         ResetConfirmedBoardSnapshot();
         ClearExternalArrows();
 
-        _evalBar?.SetBoardVisible(true);
-        _engineLines?.SetBoardVisible(true);
-        _settingsToolbar?.SetBoardVisible(true);
+        ShowOverlaysForTrackedWindow();
         _settingsToolbar?.UpdateWindowPosition(new Rectangle(windowRect.Left, windowRect.Top, windowRect.Width, windowRect.Height));
         return true;
     }
@@ -1119,7 +1115,7 @@ partial class Program
         {
             try { CancelPendingAnalysis($"external window switched ({reason})"); } catch { }
             CancelStaticLastMoveHighlightInitialHold();
-            _arrowDisplayGeneration++;
+            Interlocked.Increment(ref _arrowDisplayGeneration);
             _currentMoveArrows = null;
             _lastAnalysisVariations = null;
             _lastArrowSourceFEN = "";
@@ -1158,9 +1154,7 @@ partial class Program
         _windowStableSinceUtc = DateTime.UtcNow;
         _scheduledVerifyUtc = DateTime.MinValue;
 
-        _evalBar?.SetBoardVisible(true);
-        _engineLines?.SetBoardVisible(true);
-        _settingsToolbar?.SetBoardVisible(true);
+        ShowOverlaysForTrackedWindow();
         _settingsToolbar?.UpdateWindowPosition(new Rectangle(windowRect.Left, windowRect.Top, windowRect.Width, windowRect.Height));
         PrimeTrackedExternalFenFromProbe(boardRect, initialRawFen, initialBoardSnapshot, reason);
         RefreshDebugView("Foreground board selected");
@@ -1306,9 +1300,7 @@ partial class Program
             _requestBoardRefresh = false;
             _lastTrackedBox = SmoothBoardPosition(boardRect.Value);
 
-            _evalBar?.SetBoardVisible(true);
-            _engineLines?.SetBoardVisible(true);
-            _settingsToolbar?.SetBoardVisible(true);
+            ShowOverlaysForTrackedWindow();
             return true;
         }
         catch (Exception ex)

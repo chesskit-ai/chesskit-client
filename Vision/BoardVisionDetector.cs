@@ -102,6 +102,18 @@ namespace ChessKit
         private const int DeltaPatchSize = 32;
         private const int DeltaPatchJpegQuality = 45;
         private const double DeltaSquareDiffThreshold = 12.0;
+        // Upper bound on consecutive delta frames before a full-frame resync is
+        // forced. The server canvas only ever changes where patches land, so any
+        // square whose per-frame diff stays under DeltaSquareDiffThreshold during
+        // a continuous-change streak (highlight fades, animation slivers) diverges
+        // until the next full frame — which a busy endgame can defer indefinitely.
+        // 25 frames ≈ 5s at typical roundtrip rates.
+        private const int DeltaMaxConsecutiveFrames = 25;
+        // Wall-clock companion to the frame cap: under adaptive backoff the
+        // roundtrip rate can fall below 1/s, which would stretch 25 frames to
+        // ~25-50s of worst-case canvas staleness. Whichever cap trips first
+        // forces the full-frame resync.
+        private const int DeltaMaxStreakMs = 6000;
         private const string VisionPayloadFull = "full-v1";
         private const string VisionPayloadDelta = "square-delta-v1";
         private const int SlowVisionRequestMs = 900;
@@ -135,6 +147,8 @@ namespace ChessKit
         private static Mat? VisionDeltaBaseline;
         private static string VisionDeltaBaselineKey = "";
         private static long VisionDeltaFrameId;
+        private static int VisionDeltaStreak;
+        private static DateTime VisionDeltaLastFullFrameUtc = DateTime.MinValue;
         private static DateTimeOffset LastVisionStreamActivityUtc = DateTimeOffset.MinValue;
         private static DateTimeOffset AdaptiveVisionBackoffUntilUtc = DateTimeOffset.MinValue;
         private static DateTimeOffset LastBoardDetectionUploadUtc = DateTimeOffset.MinValue;
@@ -652,7 +666,38 @@ namespace ChessKit
                 {
                     _lastVisionFreeLimited = response.FreeLimited;
                     _lastVisionFreeReason = response.FreeReason;
+                    // Advisory highlight squares (class-13 model output) ride
+                    // along with the FEN they were detected against; consumers
+                    // must pair them with THAT response's FEN, so both are
+                    // captured together here.
+                    _lastVisionHighlights = response.Highlights;
+                    _lastVisionHighlightsFen = response.Fen;
+                    _lastVisionHighlightsTick = Environment.TickCount64;
                 }
+            }
+        }
+
+        private static string[]? _lastVisionHighlights;
+        private static string? _lastVisionHighlightsFen;
+        private static long _lastVisionHighlightsTick;
+
+        /// <summary>
+        /// The most recent advisory highlight squares with the FEN they were
+        /// detected against, or null when the server didn't emit any or the
+        /// sample is older than maxAgeMs (a stale highlight paired with a
+        /// newer position would infer the wrong mover).
+        /// </summary>
+        public static (string[] Highlights, string Fen)? GetLastVisionHighlights(int maxAgeMs = 1500)
+        {
+            lock (VisionFreeStateLock)
+            {
+                if (_lastVisionHighlights is { Length: > 0 } h &&
+                    !string.IsNullOrEmpty(_lastVisionHighlightsFen) &&
+                    Environment.TickCount64 - _lastVisionHighlightsTick <= maxAgeMs)
+                {
+                    return (h, _lastVisionHighlightsFen!);
+                }
+                return null;
             }
         }
 
@@ -965,7 +1010,10 @@ namespace ChessKit
                     if (VisionDeltaBaseline == null ||
                         !IsMatReadable(VisionDeltaBaseline) ||
                         !string.Equals(VisionDeltaBaselineKey, key, StringComparison.Ordinal) ||
-                        VisionDeltaFrameId <= 0)
+                        VisionDeltaFrameId <= 0 ||
+                        VisionDeltaStreak >= DeltaMaxConsecutiveFrames ||
+                        (VisionDeltaStreak > 0 && DateTime.UtcNow >= VisionDeltaLastFullFrameUtc.AddMilliseconds(DeltaMaxStreakMs)) ||
+                        VisionDeltaBaseline.Type() != image.Type())
                     {
                         return false;
                     }
@@ -1018,8 +1066,32 @@ namespace ChessKit
                     payloadRequest.Patches = patches;
 
                     byte[] payloadBytes = BuildCompressedVisionPayload(payloadRequest, patchBytes.ToArray());
-                    UpdateVisionDeltaBaselineLocked(key, image, frameId);
-                    LogVision($"[BoardVision] payload kind=stream-delta payloadBytes={payloadBytes.Length} patchBytes={patchBytes.Length} patches={patches.Count} mode={request.Mode}");
+                    // Advance the baseline only where patches were actually sent,
+                    // so it keeps tracking what the SERVER canvas holds. Cloning
+                    // the whole raw frame here (the old behavior) let sub-threshold
+                    // square changes slip past the diff forever: the server kept
+                    // old pixels for those squares and read a stale board during
+                    // continuous-change streaks (the ~1/s old-FEN livelock feeder).
+                    // A throw mid-loop would leave squares advanced without the
+                    // frameId, silently recreating the drift — reset on ANY escape.
+                    try
+                    {
+                        foreach (DeltaSquare square in changedSquares)
+                        {
+                            Rect rect = GetDeltaSquareRect(image.Width, image.Height, square.File, square.RankFromTop);
+                            using var srcRoi = new Mat(image, rect);
+                            using var dstRoi = new Mat(VisionDeltaBaseline, rect);
+                            srcRoi.CopyTo(dstRoi);
+                        }
+                    }
+                    catch
+                    {
+                        ResetVisionDeltaState();
+                        return false;
+                    }
+                    VisionDeltaFrameId = frameId;
+                    VisionDeltaStreak++;
+                    LogVision($"[BoardVision] payload kind=stream-delta payloadBytes={payloadBytes.Length} patchBytes={patchBytes.Length} patches={patches.Count} streak={VisionDeltaStreak} mode={request.Mode}");
                     payload = new VisionStreamPayload(payloadBytes, isDelta: true);
                     return true;
                 }
@@ -1056,6 +1128,8 @@ namespace ChessKit
             VisionDeltaBaseline = clone;
             VisionDeltaBaselineKey = key;
             VisionDeltaFrameId = frameId;
+            VisionDeltaStreak = 0;
+            VisionDeltaLastFullFrameUtc = DateTime.UtcNow;
         }
 
         private static void ResetVisionDeltaState()
@@ -1066,6 +1140,7 @@ namespace ChessKit
                 VisionDeltaBaseline = null;
                 VisionDeltaBaselineKey = "";
                 VisionDeltaFrameId = 0;
+                VisionDeltaStreak = 0;
             }
         }
 
@@ -1537,6 +1612,14 @@ namespace ChessKit
             public int FreeMovesRemaining { get; init; }
             [JsonPropertyName("freeCooldownSeconds")]
             public int FreeCooldownSeconds { get; init; }
+            // ADVISORY: algebraic squares the vision model saw as highlighted
+            // (last-move tint, selection, user analysis paint). Emitted only by
+            // servers running the class-13 model with highlight output enabled;
+            // absent/empty otherwise. The client's TurnHintDetector pair-gate
+            // decides whether they constitute a last move - NEVER trust these
+            // as a move directly (analysis paint lands on empty squares too).
+            [JsonPropertyName("highlights")]
+            public string[]? Highlights { get; init; }
         }
 
         private sealed class RemoteRect

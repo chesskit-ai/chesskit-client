@@ -535,7 +535,7 @@ partial class Program
         }
     }
 
-    private static void ClearDisplayedArrowsForPositionChange(bool allowHoldForPendingSwap = true)
+    private static void ClearDisplayedArrowsForPositionChange(bool allowHoldForPendingSwap = true, string? pendingSwapFen = null)
     {
         bool hadVisibleArrows = _showingMoves || DateTime.UtcNow < _externalArrowHoldUntilUtc;
         Interlocked.Increment(ref _arrowDisplayGeneration);
@@ -555,7 +555,8 @@ partial class Program
         else if (allowHoldForPendingSwap &&
             hadVisibleArrows &&
             _stockfish != null &&
-            !_waitingForOpponentMove)
+            !_waitingForOpponentMove &&
+            ShouldHoldArrowsForPendingSwap(pendingSwapFen))
         {
             // Hold the previous arrows on screen and let the next
             // ApplyAnalysisResult swap them in atomically, instead of clearing
@@ -583,6 +584,82 @@ partial class Program
                 ArrowTimeline.Log("ARROW_CLEARED", fen: _currentFEN, reason: "position change (no hold)");
             }
             ClearExternalArrows(reason: "position change");
+        }
+    }
+
+    /// <summary>
+    /// Per-frame check of the raw-hide fuse (armed in
+    /// ClearStaleExternalArrowsOnRawBoardChange). A raw board change that no
+    /// FEN confirmation resolved inside the fuse means a real move went the
+    /// slow confirm path - hide the stale arrows now instead of pinning the
+    /// user's own outdated suggestions to the new position for a full
+    /// vision/engine roundtrip. Runs every frame because the diff handler
+    /// only fires on changed frames (a bullet move animates 1-2 frames, then
+    /// the board is pixel-quiet at the NEW position).
+    /// </summary>
+    private static void CheckPendingRawHideFuse()
+    {
+        if (_pendingRawHideSinceUtc == DateTime.MinValue)
+            return;
+
+        if (_lastConfirmedFenAtUtc >= _pendingRawHideSinceUtc)
+        {
+            // A confirmation landed after the change - the normal
+            // clear/hold/swap path already handled the arrows.
+            _pendingRawHideSinceUtc = DateTime.MinValue;
+            return;
+        }
+
+        if ((DateTime.UtcNow - _pendingRawHideSinceUtc).TotalMilliseconds < RawBoardChangePersistHideMs)
+            return;
+
+        _pendingRawHideSinceUtc = DateTime.MinValue;
+        if (_showingMoves)
+        {
+            // Cancel any in-flight analysis BEFORE hiding, exactly like the
+            // minimize handler: the position has visibly changed but not yet
+            // confirmed, so an analysis started for the PRE-change position
+            // can complete after this hide and briefly repaint its stale
+            // arrows - the "removed, returns for a split second" blip.
+            try
+            {
+                CancelPendingAnalysis("raw board change unconfirmed (fuse)");
+            }
+            catch { }
+            ClearDisplayedArrowsForPositionChange(allowHoldForPendingSwap: false);
+            LogDiag("ARROWS", "cleared arrows: raw board change unconfirmed after fuse");
+        }
+    }
+
+    /// <summary>
+    /// Decides whether holding the old arrows is worth it for the position we
+    /// are switching to. A hold is seamless only when the replacement paints
+    /// quickly - i.e. the new position is already in the prefetch/PV cache
+    /// (swap lands in tens of ms). When it is NOT cached, the replacement is a
+    /// full engine roundtrip away and the held arrows are the user's own
+    /// now-stale suggestions sitting on the new position for 200-400ms - the
+    /// reported "my move leaves arrows stuck" case. Clearing instantly there
+    /// matches how opponent moves feel (those usually hit the cache).
+    /// Callers that don't know the target fen keep the old always-hold
+    /// behavior.
+    /// </summary>
+    private static bool ShouldHoldArrowsForPendingSwap(string? pendingSwapFen)
+    {
+        if (string.IsNullOrEmpty(pendingSwapFen))
+            return true;
+        try
+        {
+            if (!SpeculativePrefetchActive)
+                return false;                 // no cache -> replacement is always a roundtrip away
+            string key = AnalysisResultUtil.SpeculativePrefetchKeyFromFen(pendingSwapFen);
+            return !string.IsNullOrEmpty(key) &&
+                   _speculativePrefetchCache.TryGetValue(key, out var entry) &&
+                   entry != null &&
+                   (DateTime.UtcNow - entry.StoredUtc).TotalMilliseconds <= SpeculativePrefetchTtlMs;
+        }
+        catch
+        {
+            return true;                      // never let the heuristic break the swap path
         }
     }
 
@@ -716,6 +793,17 @@ partial class Program
         // ClearDisplayedArrowsForPositionChange; this path just keeps the
         // existing arrows visually stable while the detector waits for a
         // repeated, structurally sane FEN.
+        //
+        // But arm the persistence fuse: if NO confirmation resolves this
+        // change within RawBoardChangePersistHideMs, the main loop hides the
+        // arrows anyway (see the fuse check there) - a real move whose confirm
+        // went the slow path must not leave stale suggestions pinned to the
+        // new position for a full roundtrip. Own drags can't arm this: the
+        // whole detection block is paused while the mouse button is down.
+        if (_showingMoves && changedSquares <= 11 && _pendingRawHideSinceUtc == DateTime.MinValue)
+        {
+            _pendingRawHideSinceUtc = now;
+        }
         if (_overlay != null && _showingMoves && _lastTrackedBox.HasValue)
         {
             var r = _lastTrackedBox.Value;

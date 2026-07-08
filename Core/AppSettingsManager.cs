@@ -120,9 +120,20 @@ namespace ChessKit
     internal sealed class AppSettings
     {
         public bool ShowTaskbarIcon { get; set; } = true;
+        // The minimized taskbar access window (TaskbarWindow), NOT the tray icon
+        // (that is ShowTaskbarIcon above, which predates this naming). Licensed
+        // only: the Free Edition always shows its window regardless.
+        public bool ShowTaskbarWindow { get; set; } = true;
         public bool SystemTrayHideConfirmed { get; set; } = false;
         public bool SettingsToolbarHidden { get; set; } = false;
         public bool ToolbarNetworkStatsEnabled { get; set; } = false;
+        // Exclude the arrow/eval/engine-lines overlays from screen capture
+        // (WDA_EXCLUDEFROMCAPTURE). Default ON: prevents our arrows from feeding
+        // back into our own DXGI vision capture and keeps the overlay hidden
+        // from OBS/screen-share. Turn OFF when debugging in a VM viewed via
+        // capture-based remote view (the arrows would otherwise be invisible
+        // there). See CaptureExclusion.
+        public bool ExcludeOverlaysFromCapture { get; set; } = true;
         public HotkeyBindings Hotkeys { get; set; } = new();
         public bool SpeculativeAnalysisEnabled { get; set; } = true;
         public SpeculativeAnalysisMode SpeculativeAnalysisMode { get; set; } = SpeculativeAnalysisMode.Balanced;
@@ -134,6 +145,7 @@ namespace ChessKit
         public bool ToolbarInfiniteAnalysis { get; set; } = false;
         public int ToolbarThreads { get; set; } = 8;
         public int ToolbarArrowCount { get; set; } = 3;
+        public bool ToolbarBulletProfileEnabled { get; set; } = false;
         public bool ToolbarCoachModeEnabled { get; set; } = false;
         public int ToolbarCoachLevel { get; set; } = 5;
         public int ToolbarCoachMarkCount { get; set; } = 1;

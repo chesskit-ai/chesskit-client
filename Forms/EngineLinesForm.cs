@@ -69,6 +69,10 @@ namespace ChessKit
                 }
             };
             _updateTimer.Start();
+
+            // Hide engine analysis lines from screen capture (stream-safety +
+            // no vision feedback); re-applied per-HWND. See CaptureExclusion.
+            CaptureExclusion.Register(this);
         }
 
         // (Re)build the point-size fonts scaled to the current monitor DPI. The
@@ -142,6 +146,13 @@ namespace ChessKit
             lock (_lock)
             {
                 _shouldBeVisible = visible;
+            }
+
+            // Hide inline instead of waiting for the reconcile timer's next
+            // tick - the panel must vanish with the window on minimize.
+            if (!visible && Visible)
+            {
+                try { Hide(); } catch { }
             }
         }
 

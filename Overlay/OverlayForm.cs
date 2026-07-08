@@ -17,6 +17,11 @@ namespace ChessKit
         private string _lastArrowSignature = "";
         private string _lastArrowGeometrySignature = "";
         private int _arrowGeneration = 0;
+        // Count of move-arrow shows dropped because a newer generation already
+        // owns the surface. Surfaced to the app so a stuck-arrow session is
+        // diagnosable from runtime.log alone (arrow-timeline flag not required).
+        private static long _droppedStaleGenerationShows = 0;
+        public static long DroppedStaleGenerationShows => System.Threading.Interlocked.Read(ref _droppedStaleGenerationShows);
         private DateTime _lastDepthOnlyInvalidateUtc = DateTime.MinValue;
         private bool _depthOnlyInvalidatePending = false;
         private const int DepthOnlyInvalidateIntervalMs = 110;
@@ -137,6 +142,11 @@ namespace ChessKit
                 if (needsInvalidate) Invalidate();
             };
             _timer.Start();
+
+            // Exclude the arrow/coach/watermark surface from screen capture:
+            // prevents our own arrows from feeding back into our DXGI vision
+            // capture AND keeps the overlay hidden from OBS/screen-share.
+            CaptureExclusion.Register(this);
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -373,6 +383,12 @@ namespace ChessKit
             {
                 if (generation < _arrowGeneration)
                 {
+                    // A newer generation already owns the surface, so this show is
+                    // dropped WITHOUT repainting - the exact mechanism that can
+                    // freeze the previous position's arrows on screen. Count it so
+                    // the app can surface drops in runtime.log even without the
+                    // arrow-timeline flag; the reconciler corrects the pixels.
+                    System.Threading.Interlocked.Increment(ref _droppedStaleGenerationShows);
                     ArrowTimeline.Log("ARROW_DRAW_STALE_GEN", count: arrows.Count, extra: $"gen={generation} current={_arrowGeneration}");
                     return;
                 }
@@ -490,6 +506,10 @@ namespace ChessKit
             {
                 if (generation < _arrowGeneration)
                 {
+                    // Same freeze mechanism as ShowMoveArrows: a superseded show
+                    // is dropped without repainting. Count it so the coach
+                    // reconciler / diagnostics see it.
+                    System.Threading.Interlocked.Increment(ref _droppedStaleGenerationShows);
                     return;
                 }
 

@@ -76,6 +76,15 @@ namespace ChessKit
         public bool IsVerified => _fullVersionLicenseVerified;
 
         /// <summary>
+        /// Fired at most once per process, on the Free -> Licensed TRANSITION
+        /// (never on steady-state licensed re-checks). Lets the app re-seed
+        /// license-gated settings that were forced off for Free at startup
+        /// (e.g. the Bullet profile). Raised from the background monitor's
+        /// worker thread - subscribers must marshal to their UI thread.
+        /// </summary>
+        public event Action? LicenseUpgraded;
+
+        /// <summary>
         /// Intentionally a no-op. Kept so existing call sites (Program's
         /// runtime-state teardown) compile, but a Licensed session must NEVER
         /// downgrade to Free, so the sticky verified flag is never cleared.
@@ -215,9 +224,17 @@ namespace ChessKit
                         // Upgrade path (Free -> Licensed) and the steady-state
                         // licensed re-check both land here. Latch verified and
                         // clear any inactive reason so the watermark/chip drops.
+                        bool wasVerified = _fullVersionLicenseVerified;
                         _fullVersionLicenseVerified = true;
                         LicenseStatusInfo.SetReason(LicenseInactiveReason.None);
                         _log($"[LICENSE] Background check OK. Plan={current.Plan}, Expires={current.ExpiresAtUtc:O}");
+                        if (!wasVerified)
+                        {
+                            // Genuine upgrade this session - let the app re-seed
+                            // license-gated runtime state. Never let a subscriber
+                            // fault kill the monitor loop.
+                            try { LicenseUpgraded?.Invoke(); } catch { }
+                        }
                         continue;
                     }
 

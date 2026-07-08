@@ -53,8 +53,8 @@ partial class Program
 
     private static void DisposeTaskbarIcon()
     {
-        // Free Edition taskbar window (null when Licensed).
-        _freeEditionWindow?.Dispose();
+        // Taskbar access window (null when a Licensed user runs tray-only).
+        _taskbarWindow?.Dispose();
 
         _systemTray?.Dispose();
     }
@@ -86,8 +86,34 @@ partial class Program
                 _systemTray?.SetVisible(value is bool showTaskbarIcon && showTaskbarIcon, persist: true);
                 break;
 
+            case "ShowTaskbarWindow":
+                // Licensed-only toggle for the taskbar access window (distinct
+                // from ShowTaskbarIcon, which is the system TRAY icon). Free
+                // keeps its window unconditionally - the toolbar hides the row
+                // there, so any stray event is ignored.
+                bool showTaskbarWindow = value is bool taskbarWindowOn && taskbarWindowOn;
+                if (BuildLimits.IsFreeEdition)
+                {
+                    Log("[Settings] ShowTaskbarWindow ignored: the Free Edition taskbar window is mandatory");
+                    break;
+                }
+                if (showTaskbarWindow && _taskbarWindow == null)
+                    EnsureTaskbarWindowCreated();
+                else
+                    _taskbarWindow?.SetVisible(showTaskbarWindow);
+                Log($"[Settings] Taskbar window {(showTaskbarWindow ? "shown" : "hidden")}");
+                break;
+
             case "SettingsToolbarHidden":
                 SetSettingsToolbarHidden(value is bool settingsToolbarHidden && settingsToolbarHidden, persist: true);
+                break;
+
+            case "ExcludeOverlaysFromCapture":
+                // Toolbar already persisted the flag; just (re)apply the window
+                // display affinity to every live overlay surface.
+                bool excludeFromCapture = value is bool exclude && exclude;
+                CaptureExclusion.SetEnabled(excludeFromCapture);
+                Log($"[Settings] Overlays {(excludeFromCapture ? "hidden from" : "visible to")} screen capture");
                 break;
 
             case "ShowHardwareId":
@@ -357,7 +383,17 @@ partial class Program
                 break;
 
             case "MaxDepth":
-                if (_stockfish != null)
+                if (_bulletProfileEnabled)
+                {
+                    // The Bullet profile owns the live depth while active;
+                    // remember the slider value so disabling the profile
+                    // restores what the user chose, not a stale stash. Runs
+                    // even with no live engine (deferred startup / failed
+                    // switch) - the stash must track the slider regardless.
+                    _bulletProfileStashedDepth = BuildLimits.ClampDepth((int)value);
+                    Log($"[Settings] Engine depth stashed while Bullet profile active: {_bulletProfileStashedDepth}");
+                }
+                else if (_stockfish != null)
                 {
                     int depth = BuildLimits.ClampDepth((int)value);
                     _stockfish.MaxDepth = depth;
@@ -601,6 +637,58 @@ partial class Program
                 RefreshDebugView("Blitz mode changed");
                 break;
 
+            case "BulletProfile":
+                _bulletProfileEnabled = value is bool bulletProfileEnabled && bulletProfileEnabled;
+                Log($"[Settings] Bullet profile: {(_bulletProfileEnabled ? "enabled" : "disabled")}");
+                if (_stockfish != null)
+                {
+                    if (_bulletProfileEnabled)
+                    {
+                        // Depth 6 keeps each MultiPV-10 pass short enough to land
+                        // within a bullet move's think time. The MaxDepth WRITE is
+                        // unconditional: it is inert while infinite analysis is
+                        // active (every depth read branches on InfiniteAnalysis)
+                        // but becomes correct the instant infinite ends - skipping
+                        // it left the engine at slider depth x MultiPV 10, slower
+                        // than either mode. Only the live-engine churn is gated.
+                        _bulletProfileStashedDepth = _stockfish.MaxDepth;
+                        _stockfish.MaxDepth = BulletProfileDepth;
+                        if (!_stockfish.InfiniteAnalysis)
+                        {
+                            ApplyLiveEngineSetting(_ => Task.CompletedTask, $"Bullet profile depth applied: {BulletProfileDepth} (stashed {_bulletProfileStashedDepth})", clearDepthTracking: true);
+                        }
+                    }
+                    else
+                    {
+                        // Prefer the depth stashed at enable time; a profile
+                        // persisted from a previous session has no stash, so fall
+                        // back to the toolbar slider - disable must always land
+                        // on the user's chosen depth. Unconditional write for the
+                        // same reason as the enable path: without it, disabling
+                        // while infinite was active stranded depth 6 forever.
+                        int restoreDepth = _bulletProfileStashedDepth > 0
+                            ? BuildLimits.ClampDepth(_bulletProfileStashedDepth)
+                            : BuildLimits.ClampDepth(_settingsToolbar?.GetMaxDepth() ?? BuildLimits.MaxDepth);
+                        _bulletProfileStashedDepth = -1;
+                        _stockfish.MaxDepth = restoreDepth;
+                        if (!_stockfish.InfiniteAnalysis)
+                        {
+                            ApplyLiveEngineSetting(_ => Task.CompletedTask, $"Bullet profile depth restored: {restoreDepth}", clearDepthTracking: true);
+                        }
+                    }
+
+                    // Re-assert MultiPV exactly like the ArrowCount case; the
+                    // generation counters make this supersede the depth reset
+                    // above cleanly.
+                    ScheduleArrowCountEngineSetting(GetLiveAnalysisMultiPvCount());
+                }
+                else if (!_bulletProfileEnabled)
+                {
+                    _bulletProfileStashedDepth = -1;
+                }
+                RefreshDebugView("Bullet profile changed");
+                break;
+
             case "EngineChanged":
                 string newEnginePath = (string)value;
                 if (IsUsableEnginePath(newEnginePath))
@@ -645,7 +733,7 @@ partial class Program
                         {
                             selectedEngine = new UCIEngine(newEnginePath);
                             selectedEngine.InitialDepth = _settingsToolbar?.GetInitialDepth() ?? 8;
-                            selectedEngine.MaxDepth = BuildLimits.ClampDepth(_settingsToolbar?.GetMaxDepth() ?? BuildLimits.MaxDepth);
+                            selectedEngine.MaxDepth = GetLiveEngineConfiguredMaxDepth();
                             selectedEngine.InfiniteAnalysis = BuildLimits.AllowInfiniteAnalysis && (_settingsToolbar?.GetInfiniteAnalysis() ?? false);
                             selectedEngine.InitialThinkTime = 50;
                             selectedEngine.MaxThinkTime = 2000;
@@ -768,7 +856,7 @@ partial class Program
 
                                 if (_overlay != null)
                                 {
-                                    _arrowDisplayGeneration++;
+                                    Interlocked.Increment(ref _arrowDisplayGeneration);
                                     int generation = _arrowDisplayGeneration;
                                     _overlay.BeginInvoke(new Action(() =>
                                     {
@@ -787,7 +875,7 @@ partial class Program
                             // Create new engine
                             var newEngine = new UCIEngine(currentEnginePath);
                             newEngine.InitialDepth = _settingsToolbar?.GetInitialDepth() ?? 8;
-                            newEngine.MaxDepth = BuildLimits.ClampDepth(_settingsToolbar?.GetMaxDepth() ?? BuildLimits.MaxDepth);
+                            newEngine.MaxDepth = GetLiveEngineConfiguredMaxDepth();
                             newEngine.InfiniteAnalysis = BuildLimits.AllowInfiniteAnalysis && (_settingsToolbar?.GetInfiniteAnalysis() ?? false);
                             newEngine.InitialThinkTime = 50;
                             newEngine.MaxThinkTime = 2000;
@@ -868,7 +956,7 @@ partial class Program
 
                                 if (_overlay != null)
                                 {
-                                    _arrowDisplayGeneration++;
+                                    Interlocked.Increment(ref _arrowDisplayGeneration);
                                     int generation = _arrowDisplayGeneration;
                                     _overlay.BeginInvoke(new Action(() =>
                                     {
@@ -885,7 +973,7 @@ partial class Program
 
                             var newEngine = new UCIEngine(currentEnginePath);
                             newEngine.InitialDepth = _settingsToolbar?.GetInitialDepth() ?? 8;
-                            newEngine.MaxDepth = BuildLimits.ClampDepth(_settingsToolbar?.GetMaxDepth() ?? BuildLimits.MaxDepth);
+                            newEngine.MaxDepth = GetLiveEngineConfiguredMaxDepth();
                             newEngine.InfiniteAnalysis = BuildLimits.AllowInfiniteAnalysis && (_settingsToolbar?.GetInfiniteAnalysis() ?? false);
                             newEngine.InitialThinkTime = 50;
                             newEngine.MaxThinkTime = 2000;

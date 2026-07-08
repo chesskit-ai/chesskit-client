@@ -213,6 +213,55 @@ partial class Program
         });
     }
 
+    // Turn-flip debounce state (see TryQueueAnalysis). All accessed under
+    // _analysisLock, so plain fields are fine.
+    private static string _lastAnalyzedTurnBoard = "";
+    private static char _lastAnalyzedTurnSide = '\0';
+    private static DateTime _lastAnalyzedTurnUtc = DateTime.MinValue;
+    private static string _pendingTurnFlipBoard = "";
+    private static char _pendingTurnFlipSide = '\0';
+    private static int _pendingTurnFlipCount = 0;
+    private const int TurnFlipDebounceWindowMs = 700;
+    private const int TurnFlipConfirmCount = 2;
+
+    /// <summary>
+    /// True when analysis should be held because the inferred side-to-move just
+    /// flipped on a board we're ALREADY analyzing and the flip hasn't repeated.
+    /// A different board, a matching side, an expired window, or the second
+    /// sighting of the flip all return false (honor the request).
+    /// </summary>
+    private static bool ShouldDebounceTurnFlip(string fen, bool blackPerspective)
+    {
+        if (IsActiveAnalysisBoardFen(fen))
+            return false;                         // internal analysis board is authoritative
+        string board = GetBoardPosition(fen);
+        char side = blackPerspective ? 'b' : 'w';
+        if (string.IsNullOrEmpty(board) ||
+            !string.Equals(board, _lastAnalyzedTurnBoard, StringComparison.Ordinal) ||
+            side == _lastAnalyzedTurnSide)
+        {
+            _pendingTurnFlipBoard = "";           // new board or same side - nothing to debounce
+            return false;
+        }
+        if ((DateTime.UtcNow - _lastAnalyzedTurnUtc).TotalMilliseconds > TurnFlipDebounceWindowMs)
+            return false;                         // stale enough that a flip is probably real
+
+        if (string.Equals(_pendingTurnFlipBoard, board, StringComparison.Ordinal) && _pendingTurnFlipSide == side)
+            _pendingTurnFlipCount++;
+        else
+        {
+            _pendingTurnFlipBoard = board;
+            _pendingTurnFlipSide = side;
+            _pendingTurnFlipCount = 1;
+        }
+        if (_pendingTurnFlipCount >= TurnFlipConfirmCount)
+        {
+            _pendingTurnFlipBoard = "";           // confirmed twice - accept the flip
+            return false;
+        }
+        return true;
+    }
+
     private static bool TryQueueAnalysis(bool isBlackPerspective, bool force = false)
     {
         if (!EnsureLicensedFeatureAvailable("external board analysis"))
@@ -426,6 +475,22 @@ partial class Program
             }
 
             bool effectiveIsBlackPerspective = GetRequestedAnalysisPerspective(_currentFEN, isBlackPerspective);
+
+            // TURN-FLIP DEBOUNCE: on an UNCHANGED board, a flip of the inferred
+            // side-to-move must be observed twice before it re-triggers analysis.
+            // The diff-based mover inference misreads captures on contested
+            // squares (log evidence: Bxf7+/Kxf7 alternated "analysis for WHITE"
+            // and "for BLACK" on the same board 2x/second, repainting arrows for
+            // the wrong side each flip - the reported post-move flicker). This
+            // only ever DELAYS a real flip by one inference (a genuine new
+            // position has a different board and never debounces), so the side
+            // can never get stuck wrong.
+            if (ShouldDebounceTurnFlip(_currentFEN, effectiveIsBlackPerspective))
+            {
+                LogDiag("TURN", $"analysis queue skipped: turn-flip debounce on unchanged board (side={(effectiveIsBlackPerspective ? "b" : "w")})");
+                return false;
+            }
+
             _analysisIsBlackPerspective = effectiveIsBlackPerspective;
             bool bypassWaiting = ShouldBypassWaitingForExternalBothMode(_currentFEN);
 
@@ -477,6 +542,13 @@ partial class Program
                 LogDiag("ENGINE", $"analysis queue skipped: rendered assistance already complete depth={displayedDepth}/{requestedDepth}");
                 return false;
             }
+
+            // Record the (board, side) we're committing to, so the turn-flip
+            // debounce above can detect a same-board side oscillation.
+            _lastAnalyzedTurnBoard = GetBoardPosition(_currentFEN);
+            _lastAnalyzedTurnSide = effectiveIsBlackPerspective ? 'b' : 'w';
+            _lastAnalyzedTurnUtc = DateTime.UtcNow;
+            _pendingTurnFlipBoard = "";
 
             _lastQueuedAnalysisKey = analysisKey;
             _analysisInProgress = true;
@@ -693,6 +765,7 @@ partial class Program
             !string.IsNullOrWhiteSpace(observedBoard) &&
             string.Equals(currentBoard, observedBoard, StringComparison.Ordinal))
         {
+            _consecutiveCurrentBoardObservations++;
             _lastCurrentExternalBoardObservationUtc = DateTime.UtcNow;
         }
     }
@@ -898,6 +971,39 @@ partial class Program
 
         ClearStaleExternalArrowsOnUnconfirmedFenCandidate(observedFen, "candidate pending");
 
+        // LIVELOCK ESCAPE: track how persistently THIS board keeps being
+        // observed, across the resets below (repeat-gap, current-board
+        // re-observed). A time-scramble position that jumped several plies
+        // needs stable confirmation, but an intermittent stale read of the
+        // OLD board (delta-baseline artifact, ~1/s) kept resetting the
+        // counter - field trace: count cycling 1..5 at 5 roundtrips/s
+        // indefinitely, no confirm, arrows flickering on hold-expiry. A
+        // structurally-sane board seen this consistently for this long IS
+        // the position on screen - accept it regardless of the reset churn.
+        string persistentBoard = GetBoardPosition(observedFen);
+        // Any non-current observation breaks a consecutive current-board run.
+        _consecutiveCurrentBoardObservations = 0;
+        if (string.Equals(persistentBoard, _persistentCandidateBoard, StringComparison.Ordinal))
+        {
+            _persistentCandidateSeenCount++;
+        }
+        else
+        {
+            _persistentCandidateBoard = persistentBoard;
+            _persistentCandidateSeenCount = 1;
+            _persistentCandidateFirstSeenUtc = DateTime.UtcNow;
+        }
+        if (_persistentCandidateSeenCount >= PersistentCandidateAcceptCount &&
+            (DateTime.UtcNow - _persistentCandidateFirstSeenUtc).TotalMilliseconds >= PersistentCandidateAcceptAgeMs)
+        {
+            Log($"[FEN] livelock escalation accept after {_persistentCandidateSeenCount} observations over " +
+                $"{(DateTime.UtcNow - _persistentCandidateFirstSeenUtc).TotalMilliseconds:F0}ms board={persistentBoard}");
+            _persistentCandidateBoard = "";
+            _persistentCandidateSeenCount = 0;
+            ResetPendingFenCandidate();
+            return observedFen;
+        }
+
         int requiredConfirmations = GetRequiredFenConfirmationCount();
         bool needsStableNonLegalExternalConfirmation =
             ShouldRequireStableExternalFenConfirmation(observedFen, out string stableExternalReason);
@@ -917,8 +1023,13 @@ partial class Program
 
         if (needsStableNonLegalExternalConfirmation &&
             _pendingFenCandidate == observedFen &&
-            _lastCurrentExternalBoardObservationUtc > _pendingFenCandidateStartedUtc)
+            _lastCurrentExternalBoardObservationUtc > _pendingFenCandidateStartedUtc &&
+            _consecutiveCurrentBoardObservations >= 2)
         {
+            // Requires TWO consecutive current-board reads: a single stale
+            // frame (delta-baseline artifact) between valid candidate reads
+            // must not wipe the confirmation progress - that was the reset
+            // half of the confirmation livelock.
             double currentSeenMs = (now - _lastCurrentExternalBoardObservationUtc).TotalMilliseconds;
             ArrowTimeline.Log("VISION_CANDIDATE_RESET", reason: "current board re-observed", ms: currentSeenMs, extra: GetBoardPosition(observedFen));
             TraceBoard(

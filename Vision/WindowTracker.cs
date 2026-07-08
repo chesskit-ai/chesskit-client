@@ -205,7 +205,32 @@ namespace ChessKit
             if (!IsWindow(hwnd)) return false;
             if (IsIconic(hwnd)) return false;          // minimized
             if (!IsWindowVisible(hwnd)) return false;  // hidden / occluded by alt-tab etc.
+            if (IsCloaked(hwnd)) return false;         // other virtual desktop / DWM-cloaked
             return true;
+        }
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out int value, int size);
+
+        private const int DWMWA_CLOAKED = 14;
+
+        /// <summary>
+        /// A window on another virtual desktop (or UWP-suspended) stays
+        /// IsWindowVisible==true and !IsIconic while DWM "cloaks" it — the only
+        /// reliable signal is DWMWA_CLOAKED. Without this check the overlay
+        /// lingered over other apps after a desktop switch.
+        /// </summary>
+        public static bool IsCloaked(IntPtr hwnd)
+        {
+            try
+            {
+                return DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, out int cloaked, sizeof(int)) == 0
+                       && cloaked != 0;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         /// <summary>
@@ -281,50 +306,65 @@ namespace ChessKit
         public const uint EVENT_OBJECT_FOCUS = 0x8005;
         public const uint EVENT_OBJECT_LOCATIONCHANGE = 0x800B;
         public const uint EVENT_OBJECT_NAMECHANGE = 0x800C;
+        public const uint EVENT_OBJECT_CLOAKED = 0x8017;
+        public const uint EVENT_OBJECT_UNCLOAKED = 0x8018;
         public const uint WINEVENT_OUTOFCONTEXT = 0x0000;
 
-        private static IntPtr _winEventHook = IntPtr.Zero;
+        private static readonly List<IntPtr> _winEventHooks = new();
         private static WinEventDelegate? _winEventDelegate;
 
         /// <summary>
-        /// Subscribe to the full system-wide WinEvent range. The handler is
-        /// called from a worker thread the moment ANY window emits a WinEvent
-        /// (foreground, move/size, minimize, show/hide, destroy, location
-        /// change, name change, focus, etc.). The caller's handler should
-        /// filter by HWND (e.g. only react to events on the tracked
-        /// board window). Returns true on success.
+        /// Subscribe to the WinEvents that matter for overlay visibility. The
+        /// handler is called the moment a window emits one (minimize/restore,
+        /// show/hide/destroy, cloak/uncloak for virtual desktops, foreground).
+        /// The caller's handler filters by HWND. Returns true on success.
         ///
-        /// This bypasses the polling latency of the main loop —
-        /// EVENT_SYSTEM_MINIMIZESTART fires the moment the user clicks
-        /// the minimize button, before the visual animation completes,
-        /// giving us ~10ms detection vs ~100-1000ms via per-frame poll.
+        /// Deliberately NOT the full EVENT_MIN..EVENT_MAX range: that hook
+        /// delivered every LOCATIONCHANGE (cursor moves!) system-wide through
+        /// the overlay UI thread's message pump, so the one MINIMIZESTART that
+        /// mattered queued behind thousands of junk events exactly when the
+        /// system was busy — the cause of overlays lingering after minimize.
+        /// Targeted ranges keep the pump quiet and the hide at ~10ms.
         /// </summary>
         public static bool RegisterWindowStateHook(WinEventDelegate handler)
         {
-            if (_winEventHook != IntPtr.Zero)
+            if (_winEventHooks.Count > 0)
             {
                 return true; // already registered
             }
             _winEventDelegate = handler;
-            _winEventHook = SetWinEventHook(
-                EVENT_MIN,
-                EVENT_MAX,
-                IntPtr.Zero,
-                _winEventDelegate,
-                0,
-                0,
-                WINEVENT_OUTOFCONTEXT);
-            return _winEventHook != IntPtr.Zero;
+            // No FOREGROUND range: OnSystemWindowEvent has no branch for it
+            // (foreground changes are handled by the main loop's poll), so
+            // subscribing would only add wakeups to the pump this narrowing
+            // exists to keep quiet.
+            (uint min, uint max)[] ranges =
+            {
+                (EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND),
+                (EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE),
+                (EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED),
+            };
+            foreach (var (min, max) in ranges)
+            {
+                IntPtr h = SetWinEventHook(min, max, IntPtr.Zero, _winEventDelegate, 0, 0, WINEVENT_OUTOFCONTEXT);
+                if (h != IntPtr.Zero)
+                    _winEventHooks.Add(h);
+            }
+            if (_winEventHooks.Count == 0)
+            {
+                _winEventDelegate = null;
+                return false;
+            }
+            return true;
         }
 
         public static void UnregisterWindowStateHook()
         {
-            if (_winEventHook != IntPtr.Zero)
+            foreach (IntPtr h in _winEventHooks)
             {
-                UnhookWinEvent(_winEventHook);
-                _winEventHook = IntPtr.Zero;
-                _winEventDelegate = null;
+                UnhookWinEvent(h);
             }
+            _winEventHooks.Clear();
+            _winEventDelegate = null;
         }
     }
 }

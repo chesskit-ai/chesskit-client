@@ -49,9 +49,11 @@ partial class Program
     private static int _licenseFailureNoticeShown = 0;
     private static DateTime _lastEngineLicenseFailureNoticeUtc = DateTime.MinValue;
     private static readonly object _engineLicenseFailureNoticeLock = new();
-    // Free Edition taskbar helper window. Instantiated only when running Free at
-    // runtime (see Program.Lifecycle), null when Licensed.
-    private static FreeEditionWindow? _freeEditionWindow = null;
+    // Taskbar access window (minimized helper form) for both editions. Free:
+    // always created (a mandatory affordance). Licensed: created when the
+    // ShowTaskbarWindow setting allows; can be null when the user went
+    // tray-only (see Program.Lifecycle / HandleSettingChanged).
+    private static TaskbarWindow? _taskbarWindow = null;
 
     private sealed class ConfirmedPositionState
     {
@@ -87,6 +89,15 @@ partial class Program
     // we can't rely on _lastTrackedBox.HasValue == false alone as the
     // "no window" signal.
     private static volatile bool _trackingLostWaitingForReacquire = false;
+    // One-way latch set by HideOverlaysVisually (possibly from the WinEvent
+    // hook thread) and cleared only by ShowOverlaysForTrackedWindow. Gates the
+    // main loop's per-frame SetBoardVisible(true) fast paths so a frame that
+    // was already in flight when the tracked window minimized cannot re-show
+    // the eval bar / engine lines over other applications.
+    private static volatile bool _overlaySuppressed = false;
+    // TickCount64 when the suppression latch was last set; drives the 400ms
+    // release in MaybeShowOverlaysOnHealthyTrack.
+    private static long _overlaySuppressedAtTick = 0;
     // The HWND we were tracking when we lost it. Preserved across the
     // lost-tracking period so vision-driven re-acquisition can verify
     // it found the SAME board window - not a different app, the
@@ -169,8 +180,23 @@ partial class Program
         int count = _coachModeEnabled
             ? Math.Max(_maxArrowCount, _coachMarkCount)
             : _maxArrowCount;
-        return BuildLimits.ClampLines(count);
+        count = BuildLimits.ClampLines(count);
+        // The Bullet profile widens MultiPV past the display cap so the PV
+        // cache covers ~10 plausible opponent replies; the extra lines feed
+        // the cache, never the screen (the arrow display cap is unchanged).
+        if (_bulletProfileEnabled)
+            count = Math.Max(count, BulletProfileMultiPv);
+        return count;
     }
+
+    // Depth used when (re)creating the live engine. The Bullet profile pins
+    // the live depth to BulletProfileDepth so engine switches / restarts /
+    // deferred startup all come up at the profile's fast cadence instead of
+    // the slider depth (the slider value is what disabling restores).
+    private static int GetLiveEngineConfiguredMaxDepth()
+        => _bulletProfileEnabled
+            ? BulletProfileDepth
+            : BuildLimits.ClampDepth(_settingsToolbar?.GetMaxDepth() ?? BuildLimits.MaxDepth);
 
     // Performance tracking
     private static readonly Stopwatch _perfStopwatch = new();
@@ -270,9 +296,26 @@ partial class Program
     private const int BlitzAutoActivationStreak = 2;
     private const int BlitzAutoHoldMs = 9000;
     private const int BlitzRawBoardChangeArrowClearCooldownMs = 80;
+    // Persistence-gated raw hide: armed on the first move-like raw board
+    // change while arrows are shown; if no FEN confirmation resolves it within
+    // the fuse, the arrows hide without waiting for the (possibly slow)
+    // confirm+analysis roundtrip. Frame-diff is consecutive-frames, so the
+    // fuse must be resolved by CONFIRMATION, not pixel quiet - a bullet move
+    // animates for only a frame or two.
+    private static DateTime _pendingRawHideSinceUtc = DateTime.MinValue;
+    private const int RawBoardChangePersistHideMs = 120;
+    // Verify-consistency damping (see the offset-shift commit site): a MINOR
+    // vision-verify offset shift is held here until the next verify reproduces
+    // it. Prevents alternating near-identical board readings from flip-flopping
+    // the arrow anchor on a static window.
+    private static Rect? _pendingMinorBoardOffset = null;
     private const int BlitzModerateChangeSettleMs = 30;
     private const int BlitzMinimumDisplayDepth = 2;
-    private const int BlitzFenPostMouseReleaseDelayMs = 20;
+    // Was 20ms: with the pause already covering the entire button-down span
+    // and FAST-FEN requiring a complete legal-move diff, the extra post-
+    // release pause only delayed the user's OWN move confirm - the measured
+    // own-move vs opponent-move arrow latency asymmetry.
+    private const int BlitzFenPostMouseReleaseDelayMs = 0;
     private const int BlitzFastConfirmMaxChangedSquares = 8;
     private const int BlitzFastConfirmMaxPlies = 2;
     // Fast detection recovery for remote-engine sessions (and blitz). The
@@ -353,6 +396,14 @@ partial class Program
     internal static bool _showingMoves { get => _state.ShowingMoves; set => _state.ShowingMoves = value; }
     private static int _arrowDisplayGeneration = 0;
     private static int _arrowRenderToken = 0;
+    // Self-heal reconciler: periodically re-assert the current arrows to the
+    // overlay so a dropped/superseded paint (which leaves the previous
+    // position's arrows frozen on screen while _showingMoves is still true)
+    // corrects itself. A visual no-op when the overlay already matches.
+    private static DateTime _lastArrowReconcileUtc = DateTime.MinValue;
+    private static long _lastLoggedArrowDrops = 0;
+    private const int ArrowReconcileIntervalMs = 500;
+    private const int ArrowReconcileBoardStableMs = 300;
     private static DateTime _suppressCachedArrowRecoveryUntilUtc = DateTime.MinValue;
     private static DateTime _lastExternalArrowResultReadyUtc = DateTime.MinValue;
     private const int CachedArrowRecoverySuppressAfterPositionClearMs = 1600;
@@ -406,6 +457,18 @@ partial class Program
     private const int StaleConfirmRepaintBlockMs = 2500;
     private static string _lastLoggedVisionCandidateBoard = "";
     private const int ExternalNonLegalFenRepeatMaxGapMs = 900;
+    // Livelock escape (see ConfirmFenObservation): a structurally-sane
+    // candidate board observed this many times over this long is accepted
+    // regardless of the counter resets that were starving it. Tracked
+    // ACROSS resets - keyed to the board string, re-keyed when it changes.
+    private static string _persistentCandidateBoard = "";
+    private static int _persistentCandidateSeenCount = 0;
+    private static DateTime _persistentCandidateFirstSeenUtc = DateTime.MinValue;
+    private const int PersistentCandidateAcceptCount = 8;
+    private const int PersistentCandidateAcceptAgeMs = 1600;
+    // Consecutive reads that matched the CURRENT board - the candidate-reset
+    // rule requires 2+ so a single stale frame can't wipe confirm progress.
+    private static int _consecutiveCurrentBoardObservations = 0;
     private const int ExternalNonLegalFenMaxRecoverableChangedSquares = 4;
     private const int ExternalBoardSwitchChangedSquaresThreshold = 12;
     // Dead-zone rescue. Non-legal jumps with 5..11 changed squares are
@@ -474,13 +537,34 @@ partial class Program
     // mismatch is fixed so the extra predictions actually hit.
     private const int SpeculativePrefetchTopMoves = 1;
     private const int SpeculativePrefetchTtlMs = 6000;
-    private const int SpeculativePrefetchCacheMaxEntries = 48;
+    // With MultiPV 10 feeding the PV cache the per-position entry churn is
+    // roughly triple the normal profile's, so the cap doubles under Bullet
+    // or fresh entries would evict the very replies the profile precomputed.
+    private static int SpeculativePrefetchCacheMaxEntries => _bulletProfileEnabled ? 96 : 48;
     // PV cache: how many of the displayed lines to cache, how many plies down
-    // each line, and the minimum analysis depth worth caching a PV from.
-    private const int PvCacheTopLines = 3;
-    private const int PvCacheMaxPlies = 4;
-    private const int PvCacheMinDepth = 6;
+    // each line, and the minimum analysis depth worth caching a PV from. The
+    // Bullet profile flips the shape to breadth-over-depth: cache EVERY line
+    // (so ~10 plausible replies are covered) but only 2 plies down each, and
+    // accept shallower PVs since the whole profile runs at depth 6.
+    private static int PvCacheTopLines => _bulletProfileEnabled ? BulletProfileMultiPv : 3;
+    private static int PvCacheMaxPlies => _bulletProfileEnabled ? 2 : 4;
+    private static int PvCacheMinDepth => _bulletProfileEnabled ? 4 : 6;
     private static BlitzModeSetting _blitzModeSetting = BlitzModeSetting.On;
+
+    // Bullet profile (toolbar, opt-in, Licensed only): trade search depth for
+    // MultiPV breadth - depth 6 / MultiPV 10 - so the PV cache covers ~10
+    // plausible opponent replies and the next position's arrows serve
+    // instantly from cache during bullet games. volatile: written by the UI
+    // settings handler, read from analysis worker threads.
+    private static volatile bool _bulletProfileEnabled = false;
+    // Engine MaxDepth captured when the profile was enabled this session,
+    // restored on disable. -1 = nothing stashed (profile persisted from a
+    // previous session; disable then falls back to the toolbar slider). The
+    // MaxDepth handler retargets this while the profile is active so a
+    // slider drag survives a later disable.
+    private static int _bulletProfileStashedDepth = -1;
+    private const int BulletProfileMultiPv = BuildLimits.MaxEnginePvLines;
+    private const int BulletProfileDepth = 6;
 
     // Analysis toggle state
     internal static bool _continuousAnalysisEnabled { get => _state.ContinuousAnalysisEnabled; set => _state.ContinuousAnalysisEnabled = value; }
@@ -678,7 +762,11 @@ partial class Program
     // matches nothing and is skipped), and any misread is rolled back by the
     // optimistic-correction machinery. This lets the user's own move confirm
     // locally - no vision round-trip - right as the piece lands.
-    private static readonly int _localMouseOptimisticFenSuppressMs = 90;
+    // 90 -> 30: the same lever, same protections. At 90ms the user's own move
+    // still paid ~90-120ms more than the opponent's (which never arms this
+    // window); at 30ms the drop frame settles (~2 frames) and FAST-FEN
+    // confirms immediately after, making both directions near-symmetric.
+    private static readonly int _localMouseOptimisticFenSuppressMs = 30;
     private static readonly int _mouseOptimisticFenSkipLogIntervalMs = 350;
     private static DateTime _transitionNoiseIgnoreUntilUtc = DateTime.MinValue;
     private const int BlitzPostInteractionNoiseIgnoreMs = 180;
@@ -765,6 +853,11 @@ partial class Program
     private static readonly object _coachOverlaySquaresLock = new();
     private static string _lastCoachOverlaySquaresPositionKey = "";
     private static HashSet<string> _lastCoachOverlaySquares = new(StringComparer.OrdinalIgnoreCase);
+    // Last stable coach overlay data actually dispatched + its FEN, retained so
+    // ReconcileExternalArrowOverlay can re-drive a dropped coach show (guarded by
+    // _coachOverlaySquaresLock).
+    private static CoachOverlayData? _lastShownCoachData = null;
+    private static string _lastShownCoachFen = "";
 
     // Feature flags
     private static bool _boardTraceEnabled
@@ -930,6 +1023,54 @@ partial class Program
             // Logging is diagnostic only.
         }
 #endif
+    }
+
+    private static int _crashHandlersInstalled = 0;
+
+    private static void InstallGlobalCrashHandlers()
+    {
+        if (Interlocked.Exchange(ref _crashHandlersInstalled, 1) != 0)
+            return;
+        try
+        {
+            AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+                WriteCrashRecord("AppDomain.UnhandledException", e.ExceptionObject as Exception, terminating: e.IsTerminating);
+            System.Threading.Tasks.TaskScheduler.UnobservedTaskException += (_, e) =>
+            {
+                WriteCrashRecord("UnobservedTaskException", e.Exception, terminating: false);
+                e.SetObserved();
+            };
+            // WinForms UI-thread exceptions: route to the log instead of the
+            // default dialog so an overlay-thread fault is recorded even if the
+            // user dismisses the dialog and the app then exits.
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += (_, e) =>
+                WriteCrashRecord("Application.ThreadException", e.Exception, terminating: false);
+        }
+        catch { /* diagnostics must never block startup */ }
+    }
+
+    private static void WriteCrashRecord(string source, Exception? ex, bool terminating)
+    {
+        try
+        {
+            string stamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
+            string body =
+                $"{Environment.NewLine}===== CRASH {stamp} =====" +
+                $"{Environment.NewLine}source={source} terminating={terminating}" +
+                $"{Environment.NewLine}{ex?.ToString() ?? "(no exception object)"}{Environment.NewLine}";
+            // Always to the dedicated crash file (survives even when the runtime
+            // log is disabled), and mirror into runtime.log when it's on.
+            string dir = AppContext.BaseDirectory;
+            try { lock (_runtimeLogLock) { File.AppendAllText(Path.Combine(dir, "crash.log"), body, Encoding.UTF8); } } catch { }
+#if !DEBUG
+            if (_releaseRuntimeLogEnabled)
+            {
+                try { lock (_runtimeLogLock) { File.AppendAllText(Path.Combine(dir, RuntimeLogFileName), body, Encoding.UTF8); } } catch { }
+            }
+#endif
+        }
+        catch { }
     }
 
     private static void RotateRuntimeLogIfNeeded(string logPath)

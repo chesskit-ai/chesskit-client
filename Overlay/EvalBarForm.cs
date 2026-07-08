@@ -57,6 +57,10 @@ namespace ChessKit
                 }
             };
             _updateTimer.Start();
+
+            // Hide the eval bar from screen capture (stream-safety + no vision
+            // feedback); re-applied per-HWND. See CaptureExclusion.
+            CaptureExclusion.Register(this);
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -122,6 +126,14 @@ namespace ChessKit
             lock (_lock)
             {
                 _shouldBeVisible = visible;
+            }
+
+            // Hide inline instead of waiting for the reconcile timer's next
+            // tick: on a minimize the bar must vanish with the window, and
+            // the extra ~16ms was visible as a lingering sliver.
+            if (!visible && Visible)
+            {
+                try { Hide(); } catch { }
             }
         }
 
