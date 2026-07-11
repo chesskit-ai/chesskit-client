@@ -1070,6 +1070,7 @@ partial class Program
         _requestBoardRefresh = false;
         _scheduledVerifyUtc = DateTime.MinValue;
         _boardHistory.Clear();
+        ResetGeometryDriftState();
         ResetConfirmedStateTimeline();
         ResetPendingFenCandidate();
         ResetConfirmedBoardSnapshot();
@@ -1153,6 +1154,7 @@ partial class Program
         _boardHistory.Clear();
         _windowStableSinceUtc = DateTime.UtcNow;
         _scheduledVerifyUtc = DateTime.MinValue;
+        ResetGeometryDriftState();
 
         ShowOverlaysForTrackedWindow();
         _settingsToolbar?.UpdateWindowPosition(new Rectangle(windowRect.Left, windowRect.Top, windowRect.Width, windowRect.Height));
@@ -1262,6 +1264,7 @@ partial class Program
         _lastArrowSourceFEN = "";
         Interlocked.Increment(ref _arrowRenderToken);
         _currentFEN = "";
+        ResetGeometryDriftState();
         ResetConfirmedBoardSnapshot();
         ResetPendingFenCandidate();
         ResetAnalysisSchedulingState();

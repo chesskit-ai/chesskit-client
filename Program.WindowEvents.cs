@@ -791,8 +791,18 @@ partial class Program
             return false;
 
         double confirmedAgeMs = (now - _lastConfirmedFenAtUtc).TotalMilliseconds;
-        if (confirmedAgeMs < ExternalAnalysisFenHeartbeatMinConfirmedAgeMs ||
-            now < _lastExternalAnalysisFenHeartbeatUtc.AddMilliseconds(ExternalAnalysisFenHeartbeatIntervalMs))
+        // While the orientation-prompt coord-grace window is open, probe at a
+        // much faster cadence AND bypass the min-confirmed-age gate: at puzzle
+        // load the position confirms immediately, so confirmedAge is ~0 for the
+        // entire grace - the age gate silently blocked every grace probe and
+        // the coordinate oracle got ONE frame instead of four (field log
+        // 2026-07-10: puzzles still prompting despite the live coord model).
+        bool coordGraceActive = now < _orientationCoordGraceUntilUtc;
+        int heartbeatIntervalMs = coordGraceActive
+            ? OrientationCoordGraceProbeIntervalMs
+            : ExternalAnalysisFenHeartbeatIntervalMs;
+        if ((confirmedAgeMs < ExternalAnalysisFenHeartbeatMinConfirmedAgeMs && !coordGraceActive) ||
+            now < _lastExternalAnalysisFenHeartbeatUtc.AddMilliseconds(heartbeatIntervalMs))
         {
             return false;
         }
@@ -804,7 +814,13 @@ partial class Program
             IsSameArrowSourcePosition(_currentFEN) &&
             visibleSinceUtc != DateTime.MinValue;
 
-        if (hasCurrentArrows)
+        // A pending geometry-drift vote outranks the arrows-current skip: the
+        // drift quorum needs a SECOND fen sample, but on a quiet board (same
+        // FEN, diff re-baselined after an in-place board resize) no fen read
+        // would otherwise run until the next move - leaving misaligned arrows
+        // up for the rest of the think. Force the confirming probe; it is
+        // rate-limited by the heartbeat interval like any other heartbeat.
+        if (hasCurrentArrows && _geometryDriftStreak == 0)
         {
             return false;
         }
@@ -1230,6 +1246,45 @@ partial class Program
         CancelPendingAnalysis("orientation dismissed");
     }
 
+    // The coord sample's FEN is the RAW read (as the pieces appear on screen);
+    // once a flip is resolved/locked, _currentFEN carries the corrected
+    // placement - so a flipped board's sample must be matched against the
+    // MIRROR of the current placement or re-pins die exactly where they
+    // matter. Mirroring a FEN placement = reversing the whole string (row
+    // order and within-row order both reverse; digit runs are single chars).
+    private static bool CoordSamplePlacementMatches(string sampleFen, string boardPosition)
+    {
+        string samplePlacement = GetBoardPosition(sampleFen);
+        if (string.IsNullOrEmpty(samplePlacement))
+            return false;
+        if (string.Equals(samplePlacement, boardPosition, StringComparison.Ordinal))
+            return true;
+        char[] mirrored = samplePlacement.ToCharArray();
+        Array.Reverse(mirrored);
+        return string.Equals(new string(mirrored), boardPosition, StringComparison.Ordinal);
+    }
+
+    // Defer the orientation modal for a NEW placement while the coordinate
+    // oracle still has fresh chances (the modal pauses detection, so once it
+    // shows, no coord read can ever rescue it). Keyed per placement: each new
+    // board gets one grace window, then the prompt proceeds.
+    private static bool ShouldDeferOrientationPromptForCoordGrace(string boardPosition, bool isAnalysisBoard)
+    {
+        if (isAnalysisBoard)
+            return false;
+
+        DateTime now = DateTime.UtcNow;
+        if (!string.Equals(_orientationCoordGraceBoard, boardPosition, StringComparison.Ordinal))
+        {
+            _orientationCoordGraceBoard = boardPosition;
+            _orientationCoordGraceUntilUtc = now.AddMilliseconds(OrientationCoordGraceMs);
+            TraceBoard($"orientation prompt deferred {OrientationCoordGraceMs}ms for coord grace board={boardPosition}");
+            return true;
+        }
+
+        return now < _orientationCoordGraceUntilUtc;
+    }
+
     private static bool TryResolveOrientationDecision(
         string fen,
         bool isAnalysisBoard,
@@ -1241,6 +1296,17 @@ partial class Program
         string boardPosition = GetBoardPosition(fen);
         if (string.IsNullOrWhiteSpace(boardPosition))
             return true;
+
+        // A position without both kings is a transient misread (video scene
+        // transition, partial render) - a real game always has both. Never make
+        // an orientation decision on one, and above all never PROMPT on one:
+        // the junk read fades on the next frame but the modal stays, asking the
+        // user about a position that never existed. Defer with no opinion.
+        if (!isAnalysisBoard &&
+            (boardPosition.IndexOf('K') < 0 || boardPosition.IndexOf('k') < 0))
+        {
+            return true;
+        }
 
         if (!isAnalysisBoard &&
             TryInferExternalBoardFlippedFromOpposingPawnFiles(boardPosition, out int standardPawnFileConflicts, out int flippedPawnFileConflicts) is bool structuralFlipped)
@@ -1254,6 +1320,35 @@ partial class Program
         if (TryGetManualOrientationOverride(boardPosition, out bool manualFlipped))
         {
             detectedBoardFlipped = manualFlipped;
+            return true;
+        }
+
+        // Ground-truth orientation from the board's own rank coordinates, read
+        // server-side and gated to 0% false-positive. It outranks every memory /
+        // heuristic signal below (and self-heals a wrongly-locked orientation),
+        // yielding only to an explicit manual override. Requires the coord read
+        // to belong to THIS board (same placement) so a stale sample from the
+        // previous position can never flip the current one. Absent coords fall
+        // straight through to the existing pawn-structure heuristic / prompt.
+        if (!isAnalysisBoard &&
+            BoardVisionDetector.GetLastVisionCoordOrientation(maxAgeMs: 4000) is var coordReading &&
+            coordReading.HasValue &&
+            CoordSamplePlacementMatches(coordReading.Value.Fen, boardPosition))
+        {
+            detectedBoardFlipped = coordReading.Value.Flipped;
+            // Coord landmarks are ground truth, so PIN the orientation for this
+            // board context. Real-board coord recall is imperfect (the model
+            // misses the '1'/'8' on many frames), so without pinning a later
+            // coord-less frame would fall through to the pawn heuristic and, on
+            // an ambiguous position, re-raise the orientation prompt even though
+            // the coords already answered it. A genuine board switch resets the
+            // pin; a fresh coord read that disagrees (the board was flipped)
+            // re-pins on its own frame. Also seed the short-term memory so the
+            // recent-decision path agrees for the current side-to-move.
+            PinExternalBoardOrientation(coordReading.Value.Flipped, "coord-landmark");
+            RememberRecentOrientationDecision(coordReading.Value.Flipped, isAnalysisBoard, referenceColor);
+            TraceBoard(
+                $"orientation coord-landmark board={boardPosition} flipped={coordReading.Value.Flipped} source=external");
             return true;
         }
 
@@ -1313,6 +1408,8 @@ partial class Program
         if (ShouldPromptForSparseExternalOrientation(boardPosition, isAnalysisBoard, referenceColor) &&
             CanPromptForOrientation(boardPosition, isAnalysisBoard))
         {
+            if (ShouldDeferOrientationPromptForCoordGrace(boardPosition, isAnalysisBoard))
+                return false; // defer without the modal; fen reads keep flowing
             RequestOrientationPrompt(boardPosition, referenceColor, isAnalysisBoard);
             return false;
         }
@@ -1372,6 +1469,8 @@ partial class Program
         {
             if (shouldPrompt)
             {
+                if (ShouldDeferOrientationPromptForCoordGrace(boardPosition, isAnalysisBoard))
+                    return false; // defer without the modal; fen reads keep flowing
                 RequestOrientationPrompt(boardPosition, referenceColor, isAnalysisBoard);
                 return false;
             }

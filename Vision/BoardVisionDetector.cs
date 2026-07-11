@@ -301,7 +301,17 @@ namespace ChessKit
             }
         }
 
-        public string ProcessBoard(Mat boardImage, Rect boardRect, bool isBlackPerspective = false, bool forceFullFrame = false)
+        // Orientation-grace probes upload at NATIVE resolution: on big boards
+        // (~950px+) the standard 640/q40 transform shrinks the site's rank
+        // digits below what any detector can read (field-measured: coord recall
+        // 12% at 2400px viewports vs 84-94% at small ones). The server's coord
+        // model runs these at a 960 input. Costs ~100KB for the few probe
+        // frames of a grace window; the piece/FEN path is unaffected (the
+        // server letterboxes any upload to 640 for the FEN model).
+        private const int CoordProbeUploadMaxDimension = 1100;
+        private const int CoordProbeJpegQuality = 60;
+
+        public string ProcessBoard(Mat boardImage, Rect boardRect, bool isBlackPerspective = false, bool forceFullFrame = false, bool recordBoardRectSample = false, bool coordProbeNative = false)
         {
             try
             {
@@ -314,7 +324,9 @@ namespace ChessKit
                 // sub-640 board left at native size sat small inside the server's
                 // letterboxed frame and churned the delta baseline every resize -
                 // the cause of detection dying below ~640px.
-                bool resizedForModel = TryResizeForModel(board, FenUploadMaxDimension, out Mat scaledBoard);
+                int uploadMaxDimension = coordProbeNative ? CoordProbeUploadMaxDimension : FenUploadMaxDimension;
+                int uploadJpegQuality = coordProbeNative ? CoordProbeJpegQuality : FenDetectionJpegQuality;
+                bool resizedForModel = TryResizeForModel(board, uploadMaxDimension, out Mat scaledBoard);
                 Mat uploadBoard = resizedForModel ? scaledBoard : board;
                 try
                 {
@@ -324,9 +336,27 @@ namespace ChessKit
                         Hwid = HardwareIdentity.GetHardwareId(),
                         IsBlackPerspective = isBlackPerspective
                     };
-                    RemoteVisionResponse? response = SendVisionRequest(request, uploadBoard, FenDetectionJpegQuality, forceFullFrame);
+                    RemoteVisionResponse? response = SendVisionRequest(request, uploadBoard, uploadJpegQuality, forceFullFrame);
                     if (response?.Ok == true && !string.IsNullOrWhiteSpace(response.Fen))
                     {
+                        // Geometry drift sample: the sent image IS the tracked-box
+                        // crop, so a healthy server boardRect spans ~the full sent
+                        // frame. Only the tracked external-board caller opts in -
+                        // probe/candidate callers crop other regions and would
+                        // poison the sample. Additionally require a PLAUSIBLE
+                        // position (both kings in the placement): junk reads from
+                        // page reloads / post-game screens must never feed drift
+                        // votes - they made the tracker chase a phantom "board"
+                        // on the between-games page.
+                        if (recordBoardRectSample)
+                        {
+                            string placement = response.Fen;
+                            int spaceIdx = placement.IndexOf(' ');
+                            if (spaceIdx > 0)
+                                placement = placement.Substring(0, spaceIdx);
+                            if (placement.IndexOf('K') >= 0 && placement.IndexOf('k') >= 0)
+                                RecordFenBoardRectSample(response.BoardRect, uploadBoard.Width, uploadBoard.Height);
+                        }
                         return response.Fen;
                     }
 
@@ -673,6 +703,11 @@ namespace ChessKit
                     _lastVisionHighlights = response.Highlights;
                     _lastVisionHighlightsFen = response.Fen;
                     _lastVisionHighlightsTick = Environment.TickCount64;
+                    // Advisory coord-orientation ("white"/"black") rides along
+                    // with the FEN it was read against, same as highlights.
+                    _lastVisionCoordOrientation = response.CoordOrientation;
+                    _lastVisionCoordOrientationFen = response.Fen;
+                    _lastVisionCoordOrientationTick = Environment.TickCount64;
                 }
             }
         }
@@ -680,6 +715,88 @@ namespace ChessKit
         private static string[]? _lastVisionHighlights;
         private static string? _lastVisionHighlightsFen;
         private static long _lastVisionHighlightsTick;
+
+        private static string? _lastVisionCoordOrientation;
+        private static string? _lastVisionCoordOrientationFen;
+        private static long _lastVisionCoordOrientationTick;
+
+        // Latest fen-response board box, normalized to the sent crop (fill = box
+        // size / sent size, offset = box origin / sent size). Healthy tracking
+        // keeps fill near 1.0 and offset near 0 because the crop IS the tracked
+        // board rect; a board resized in place inside a stale crop shows up here
+        // immediately even though the FEN keeps reading fine.
+        private static double _lastFenBoardFillX, _lastFenBoardFillY;
+        private static double _lastFenBoardOffsetX, _lastFenBoardOffsetY;
+        private static long _lastFenBoardRectTick;
+        private static long _lastFenBoardRectSeq;
+
+        public readonly record struct FenBoardObservation(
+            double FillX, double FillY, double OffsetX, double OffsetY, long Seq);
+
+        private static void RecordFenBoardRectSample(RemoteRect? rect, int sentWidth, int sentHeight)
+        {
+            if (rect == null || sentWidth <= 0 || sentHeight <= 0 ||
+                rect.Width <= 0 || rect.Height <= 0)
+            {
+                return; // no board box this frame; the old sample just ages out
+            }
+
+            lock (VisionFreeStateLock)
+            {
+                _lastFenBoardFillX = rect.Width / (double)sentWidth;
+                _lastFenBoardFillY = rect.Height / (double)sentHeight;
+                _lastFenBoardOffsetX = rect.X / (double)sentWidth;
+                _lastFenBoardOffsetY = rect.Y / (double)sentHeight;
+                _lastFenBoardRectTick = Environment.TickCount64;
+                _lastFenBoardRectSeq++;
+            }
+        }
+
+        /// <summary>
+        /// The most recent fen-response board box normalized to the sent crop,
+        /// or null when the server hasn't reported one recently. Seq increments
+        /// per sample so consumers can vote once per response.
+        /// </summary>
+        public static FenBoardObservation? GetLastVisionFenBoardObservation(int maxAgeMs = 2500)
+        {
+            lock (VisionFreeStateLock)
+            {
+                if (_lastFenBoardRectSeq > 0 &&
+                    Environment.TickCount64 - _lastFenBoardRectTick <= maxAgeMs)
+                {
+                    return new FenBoardObservation(
+                        _lastFenBoardFillX, _lastFenBoardFillY,
+                        _lastFenBoardOffsetX, _lastFenBoardOffsetY,
+                        _lastFenBoardRectSeq);
+                }
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// The board's true orientation as read from coordinate landmarks by the
+        /// server ("white" = unflipped, "black" = flipped), paired with the FEN it
+        /// was detected against, or null when the server didn't emit one or the
+        /// sample is older than maxAgeMs. The server only emits this when the
+        /// landmarks are unambiguous (0% false-positive), so a non-null answer is
+        /// authoritative for orientation.
+        /// </summary>
+        public static (bool Flipped, string Fen)? GetLastVisionCoordOrientation(int maxAgeMs = 1500)
+        {
+            lock (VisionFreeStateLock)
+            {
+                if (!string.IsNullOrEmpty(_lastVisionCoordOrientation) &&
+                    !string.IsNullOrEmpty(_lastVisionCoordOrientationFen) &&
+                    Environment.TickCount64 - _lastVisionCoordOrientationTick <= maxAgeMs)
+                {
+                    if (string.Equals(_lastVisionCoordOrientation, "black", StringComparison.OrdinalIgnoreCase))
+                        return (true, _lastVisionCoordOrientationFen!);
+                    if (string.Equals(_lastVisionCoordOrientation, "white", StringComparison.OrdinalIgnoreCase))
+                        return (false, _lastVisionCoordOrientationFen!);
+                }
+                return null;
+            }
+        }
 
         /// <summary>
         /// The most recent advisory highlight squares with the FEN they were
@@ -1620,6 +1737,14 @@ namespace ChessKit
             // as a move directly (analysis paint lands on empty squares too).
             [JsonPropertyName("highlights")]
             public string[]? Highlights { get; init; }
+            // ADVISORY: the board's true orientation as read from rank-coordinate
+            // landmarks ("white" = rank 1 at bottom / unflipped, "black" = flipped).
+            // Emitted only by the 16-class coord model when the '1'/'8' landmarks
+            // are unambiguous (0% false-positive by design); absent/null otherwise.
+            // Lets the client skip the orientation prompt on coordinate-visible
+            // boards; when absent the client keeps its own pawn-structure heuristic.
+            [JsonPropertyName("coordOrientation")]
+            public string? CoordOrientation { get; init; }
         }
 
         private sealed class RemoteRect

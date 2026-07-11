@@ -189,14 +189,15 @@ partial class Program
         return count;
     }
 
-    // Depth used when (re)creating the live engine. The Bullet profile pins
-    // the live depth to BulletProfileDepth so engine switches / restarts /
-    // deferred startup all come up at the profile's fast cadence instead of
-    // the slider depth (the slider value is what disabling restores).
+    // Depth used when (re)creating the live engine. The user's depth slider is
+    // authoritative: a deliberately-raised depth (e.g. 13) is honored even under
+    // the Bullet profile. The profile still delivers fast cadence through its
+    // wide MultiPV + prefetch cache and the quick-arrow-then-refine pipeline
+    // (quick arrows render at _quickArrowDepth, then refine toward this ceiling),
+    // so pinning the ceiling to BulletProfileDepth only capped that refinement
+    // short of the user's chosen depth. Bullet no longer overrides the slider.
     private static int GetLiveEngineConfiguredMaxDepth()
-        => _bulletProfileEnabled
-            ? BulletProfileDepth
-            : BuildLimits.ClampDepth(_settingsToolbar?.GetMaxDepth() ?? BuildLimits.MaxDepth);
+        => BuildLimits.ClampDepth(_settingsToolbar?.GetMaxDepth() ?? BuildLimits.MaxDepth);
 
     // Performance tracking
     private static readonly Stopwatch _perfStopwatch = new();
@@ -828,6 +829,92 @@ partial class Program
     private static bool _orientationConfirmStreakFlipped = false;
     private static int _orientationConfirmStreakCount = 0;
     private const int OrientationLockStreakThreshold = 3;
+
+    // Coord-grace: before showing the orientation prompt for a NEW external
+    // board, give the coordinate oracle a short window of additional fen reads.
+    // The prompt used to fire after a SINGLE vision frame and then PAUSE
+    // detection - the coord read (79% per-frame recall on coord-visible
+    // boards) got exactly one chance and could never recover. 3-4 extra
+    // frames resolve a coord-visible board with ~99% probability; a genuinely
+    // coordinate-less board just sees its prompt ~2s later.
+    private const int OrientationCoordGraceMs = 3200;
+    // Heartbeat cadence while the grace window is open (vs the normal ~2.2s):
+    // gives the oracle ~3 reads per grace instead of 1.
+    private const int OrientationCoordGraceProbeIntervalMs = 700;
+    private static string _orientationCoordGraceBoard = "";
+    private static DateTime _orientationCoordGraceUntilUtc = DateTime.MinValue;
+
+    // === BOARD-GONE DETECTION (kingless-read streak) ===
+    // A single kingless read is transient junk (video wipe, half-render) and is
+    // deliberately ignored by the arrow-clear / orientation / drift gates. A
+    // STREAK of them means the board is genuinely gone (post-game screen, page
+    // reload between bullet games): stale arrows must clear instead of ghosting,
+    // and drift votes / large re-anchors must stand down so the tracker cannot
+    // jump onto a phantom "board" detected on the non-game page (2026-07-10 log:
+    // 951px board abandoned for a 553px phantom during a lichess reload, costing
+    // ~27s of frozen arrows when the new game started).
+    private const int KinglessBoardGoneStreak = 4;
+    private static int _kinglessReadStreak = 0;
+
+    // === GEOMETRY-DRIFT SELF-HEAL ===
+    // The server reports the detected board box on every fen response,
+    // normalized against the sent crop (which IS the tracked board rect). When
+    // the on-screen board resizes in place (e.g. the site's board-resize handle
+    // dragged inside an unchanged browser window), the window rect never moves,
+    // FEN reads keep succeeding, and no board-mode probe trigger fires - the
+    // arrows stay anchored to the stale rect indefinitely. These thresholds
+    // detect that state from the fen responses themselves and schedule a
+    // board re-verify through the normal tracking path.
+    // The fen upload crop carries a ~3% coord margin per side, so a healthy
+    // board fills ~0.94 of the sent frame (not ~1.0). 0.85 keeps ~2%-box-noise
+    // clearance above while still catching a ~10% linear shrink.
+    private const double GeometryDriftMinFill = 0.85;      // board fills <85% of the crop
+    private const double GeometryDriftMaxOffset = 0.10;    // or sits >10% away from the crop origin (healthy ~3%)
+    private const int GeometryDriftStreakRequired = 2;     // consecutive fen responses agreeing
+    private const int GeometryDriftSampleMaxAgeMs = 2500;
+    private const int GeometryDriftVerifyCooldownMs = 5000;
+    // Two votes more than 10s apart are not "consecutive" - restart the streak
+    // instead of pairing unrelated observations (possibly from different
+    // windows/crops) into a quorum.
+    private const int GeometryDriftStreakMaxGapMs = 10000;
+    // Fruitless-verify backoff: if drift keeps firing but the verify never
+    // changes the rect (a systematic fen-vs-board box disagreement, not real
+    // drift), each fire doubles the cooldown up to this cap so the failure
+    // mode degrades to an occasional probe instead of a full-screen scan
+    // every 5 seconds forever. A healthy sample resets the backoff.
+    private const int GeometryDriftVerifyCooldownMaxMs = 120000;
+    private static long _lastGeometryDriftSampleSeq = 0;
+    private static int _geometryDriftStreak = 0;
+    private static DateTime _geometryDriftStreakLastUtc = DateTime.MinValue;
+    private static DateTime _lastGeometryDriftVerifyUtc = DateTime.MinValue;
+    private static int _geometryDriftCooldownMs = GeometryDriftVerifyCooldownMs;
+    // While a drift-triggered verify is pending, the healthy local board scan
+    // runs with THIS upload budget instead of the default 20s one. Confirmed-
+    // wrong geometry means visibly misplaced arrows - waiting out a budget
+    // meant for routine polling is what let a mis-anchored board sit wrong for
+    // 20+ seconds (2026-07-10 log: drift detected at +7s, corrective detect
+    // still throttled when the user gave up at +25s).
+    private const int GeometryDriftVerifyBudgetOverrideMs = 1500;
+    private const int GeometryDriftVerifyFastWindowMs = 15000;
+    private static DateTime _geometryDriftVerifyPendingUntilUtc = DateTime.MinValue;
+    // SEVERE drift (board at <75% of the crop, or >15% displaced) is far beyond
+    // any box noise (~2%) - a single sample is proof enough. Only mild drift
+    // (between the Min/Severe thresholds) waits for the 2-vote quorum.
+    private const double GeometryDriftSevereFill = 0.75;
+    private const double GeometryDriftSevereOffset = 0.15;
+    // FINE-TRIM: the acquisition-time board box carries a small one-shot bias
+    // ("arrows off by a few pixels, consistently"). The fen responses re-measure
+    // the board box every frame; averaging N healthy samples cancels the jitter
+    // and exposes the constant centering bias, which is then applied as a
+    // position-only nudge to the anchor. Bounded to a few px - anything larger
+    // is the drift path's job.
+    private const int GeometryTrimMinSamples = 8;
+    private const double GeometryTrimMinPx = 2.0;
+    private const double GeometryTrimMaxPx = 12.0;
+    private const int GeometryTrimCooldownMs = 10000;
+    private static double _geometryTrimDxSum, _geometryTrimDySum;
+    private static int _geometryTrimCount;
+    private static DateTime _lastGeometryTrimUtc = DateTime.MinValue;
     internal static int _externalTrackedPositionCount { get => _state.ExternalTrackedPositionCount; set => _state.ExternalTrackedPositionCount = value; }
     private static DateTime _recentOrientationDecisionUntilUtc = DateTime.MinValue;
     private static bool _recentOrientationDecisionFlipped = false;

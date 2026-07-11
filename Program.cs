@@ -753,7 +753,13 @@ partial class Program
                                 }
 
                                 bool sizeChanged = WindowTracker.WindowSizeChanged(_lastWindowRect, winRect);
-                                _framesSinceWindowTrackVerify++;
+                                // Saturating increment: minimize/restore re-acquisition seeds this
+                                // counter with int.MaxValue to force a verify next frame; a bare ++
+                                // wrapped it to int.MinValue, silently disabling the periodic verify
+                                // (the >= interval check stays false for ~2 billion frames) until a
+                                // verify that could no longer trigger reset it. Saturate instead.
+                                if (_framesSinceWindowTrackVerify < int.MaxValue)
+                                    _framesSinceWindowTrackVerify++;
                                 bool periodicVerifyDue = _framesSinceWindowTrackVerify >= WindowTrackVerifyIntervalFrames && healthyVerifyCooldownElapsed;
                                 bool scheduledVerifyDue = _scheduledVerifyUtc != DateTime.MinValue
                                     && DateTime.UtcNow >= _scheduledVerifyUtc;
@@ -782,7 +788,16 @@ partial class Program
                                     {
                                         ClearExternalArrows();
                                     }
-                                    else if (_overlay != null && _showingMoves)
+                                    // Push the projected rect to the overlay UNCONDITIONALLY
+                                    // (not gated on _showingMoves): during a resize the
+                                    // clear/re-show cycle races the UI thread's render token,
+                                    // so shows get dropped while the previously painted arrow
+                                    // pixels stay on the surface - anchored to the pre-resize
+                                    // rect. This per-frame rect update rescales whatever the
+                                    // overlay is showing (including those lingering pixels) to
+                                    // the live board; it is rect-only, cheap, and no-ops when
+                                    // the overlay is hidden.
+                                    if (_overlay != null)
                                     {
                                         _overlay.BeginInvoke(new Action(() =>
                                             _overlay.SetBoardScreenPosition(new Rectangle(projected.X, projected.Y, projected.Width, projected.Height))));
@@ -810,7 +825,10 @@ partial class Program
                                     _lastWindowRect = winRect;
                                     _boardLostFrames = 0;
                                     MaybeShowOverlaysOnHealthyTrack();
-                                    if (_overlay != null && _showingMoves)
+                                    // Unconditional (see the resize branch above): lingering
+                                    // arrow pixels must follow the live rect even while
+                                    // _showingMoves is false mid-resize.
+                                    if (_overlay != null)
                                     {
                                         _overlay.BeginInvoke(new Action(() =>
                                             _overlay.SetBoardScreenPosition(new Rectangle(projected.X, projected.Y, projected.Width, projected.Height))));
@@ -863,8 +881,19 @@ partial class Program
                         bool trackedWindowHealthyForBoardScan =
                             _trackedHwnd != IntPtr.Zero &&
                             WindowTracker.IsTrackable(_trackedHwnd);
+                        // Event-driven verifies (window resize settled, scheduled verify,
+                        // explicit refresh, confirmed geometry drift) get a FAST upload
+                        // budget: they are rare, high-signal moments where the board rect
+                        // is likely wrong and arrows are visibly misplaced. The default
+                        // 20s budget exists to throttle routine polling, and letting it
+                        // defer these repairs is what made a resized board sit with
+                        // misaligned arrows for 20+ seconds.
                         int? localBoardDetectionMinInterval =
-                            trackedWindowHealthyForBoardScan ? null : _boardDetectionAcquireMinIntervalMs;
+                            trackedWindowHealthyForBoardScan
+                                ? ((windowTrackVerifyDue || DateTime.UtcNow < _geometryDriftVerifyPendingUntilUtc)
+                                    ? GeometryDriftVerifyBudgetOverrideMs
+                                    : (int?)null)
+                                : _boardDetectionAcquireMinIntervalMs;
                         bool boardRefreshSearchAllowed = _requestBoardRefresh &&
                             (trackedWindowHealthyForBoardScan
                                 ? healthyVerifyCooldownElapsed
@@ -1267,12 +1296,30 @@ partial class Program
                                                             goto offsetShiftDeferred;
                                                         }
                                                     }
+                                                    // While the board is genuinely gone (kingless-read streak:
+                                                    // post-game screen, page reload) a "board" detected on the
+                                                    // non-game page is a phantom - committing a large re-anchor
+                                                    // to it abandons the real board's slot and costs ~20s+ of
+                                                    // frozen arrows when the next game starts there. Hold the
+                                                    // old anchor; the next game usually renders in the SAME
+                                                    // place and confirms via the normal board-switch path.
+                                                    if (_kinglessReadStreak >= KinglessBoardGoneStreak &&
+                                                        (Math.Abs(shiftDw) > _boardOffsetInWindow.Width * 0.2 ||
+                                                         Math.Abs(shiftDh) > _boardOffsetInWindow.Height * 0.2))
+                                                    {
+                                                        LogDiag("WINTRACK",
+                                                            $"offset shift deferred: kingless-read streak (board likely absent) dw={shiftDw} dh={shiftDh}");
+                                                        goto offsetShiftDeferred;
+                                                    }
+
                                                     _pendingMinorBoardOffset = null;
 
                                                     _boardOffsetInWindow = detectedOffset;
                                                     UpdateBoardWindowProjection(detectedBoardRect, winRect);
                                                     _lastTrackedBox = detectedBoardRect;
                                                     _boardHistory.Clear();
+                                                    // Drift votes measured against the old crop are void now.
+                                                    ResetGeometryDriftState();
                                                     if (majorOffsetShift)
                                                     {
                                                         _trackedWindowLastResizeUtc = DateTime.UtcNow;
@@ -1493,13 +1540,19 @@ partial class Program
                             }
                             else
                             {
-                                // Convert OpenCV Rect to System.Drawing.Rectangle for capture
+                                // Convert OpenCV Rect to System.Drawing.Rectangle for capture.
+                                // The border must fit the fen-upload coord margin (3% of the
+                                // board, see the ProcessBoard call): rank/file coordinate
+                                // glyphs sit in the outermost pixels of the board, and a
+                                // box-tight crop clips them - measured to HALVE the coord
+                                // orientation-oracle's recall vs a 3%-margin crop.
+                                int fenCropBorder = Math.Max(20, (int)Math.Ceiling(Math.Max(trackedBox.Width, trackedBox.Height) * 0.03));
                                 Rectangle virtualScreen = GetVirtualScreenBounds();
                                 var wantedCaptureRegion = new Rectangle(
-                                    trackedBox.X - 20,
-                                    trackedBox.Y - 20,
-                                    trackedBox.Width + 40,
-                                    trackedBox.Height + 40);
+                                    trackedBox.X - fenCropBorder,
+                                    trackedBox.Y - fenCropBorder,
+                                    trackedBox.Width + fenCropBorder * 2,
+                                    trackedBox.Height + fenCropBorder * 2);
                                 var captureRegion = Rectangle.Intersect(wantedCaptureRegion, virtualScreen);
                                 if (captureRegion.Width <= 0 || captureRegion.Height <= 0)
                                 {
@@ -1673,7 +1726,33 @@ partial class Program
                                     {
                                         // === FPS DIAG: time the full FEN sub-step ===
                                         long fenStartMs = _perfStopwatch.ElapsedMilliseconds;
-                                        var fen = _detector.ProcessBoard(regionFrame, new Rect(localBoardX, localBoardY, trackedBox.Width, trackedBox.Height), false, forceFullFenProbe);
+                                        // Upload crop = board + ~3% margin (clamped to what the
+                                        // capture region actually has on each side; screen-edge
+                                        // clips shrink it gracefully). The margin keeps the
+                                        // board-edge coordinate glyphs fully inside the sent
+                                        // frame - a box-tight crop clips them and halves the
+                                        // coord orientation-oracle recall (18% -> 46% measured).
+                                        // Only the UPLOAD inflates; boardView (pixel-diff
+                                        // snapshots) and arrow anchoring stay board-tight.
+                                        int coordMargin = Math.Max(0, Math.Min(
+                                            (int)Math.Ceiling(Math.Max(trackedBox.Width, trackedBox.Height) * 0.03),
+                                            Math.Min(
+                                                Math.Min(localBoardX, localBoardY),
+                                                Math.Min(
+                                                    captureRegion.Width - (localBoardX + trackedBox.Width),
+                                                    captureRegion.Height - (localBoardY + trackedBox.Height)))));
+                                        var fenUploadRect = new Rect(
+                                            localBoardX - coordMargin,
+                                            localBoardY - coordMargin,
+                                            trackedBox.Width + coordMargin * 2,
+                                            trackedBox.Height + coordMargin * 2);
+                                        var fen = _detector.ProcessBoard(
+                                            regionFrame, fenUploadRect, false, forceFullFenProbe,
+                                            recordBoardRectSample: true,
+                                            // Orientation grace: ship these frames at native res so
+                                            // the server's coord model can actually read big-board
+                                            // rank digits (crushed to ~6px by the 640 transform).
+                                            coordProbeNative: DateTime.UtcNow < _orientationCoordGraceUntilUtc);
 #if DEBUG
                                         _fpsDiagP2FenSum += _perfStopwatch.ElapsedMilliseconds - fenStartMs;
                                         _fpsDiagP2FenCalls++;
@@ -1736,6 +1815,7 @@ partial class Program
                                                     UpdateConfirmedBoardSnapshot(boardView);
                                                     ResetPendingFenCandidate();
                                                     _externalRawBoardChangeSettleUntilUtc = DateTime.MinValue;
+                                                    _kinglessReadStreak = 0; // same-as-confirmed read = plausible board present
 
                                                     bool staticHighlightChangedSide = TryApplyStaticLastMoveHighlightTurnHintAndQueue(_currentFEN, boardView);
                                                     if (!staticHighlightChangedSide &&
@@ -1751,6 +1831,14 @@ partial class Program
                                             }
                                             else
                                             {
+                                                // Board-gone evidence: consecutive kingless raw reads.
+                                                // One is noise; a streak flips the board-gone gates.
+                                                string rawPlacementForStreak = GetBoardPosition(fen);
+                                                _kinglessReadStreak =
+                                                    (rawPlacementForStreak.IndexOf('K') < 0 || rawPlacementForStreak.IndexOf('k') < 0)
+                                                        ? _kinglessReadStreak + 1
+                                                        : 0;
+
                                                 string confirmDiffText = boardDiff == null
                                                     ? "none"
                                                     : $"{boardDiff.ChangedSquares}sq avg={boardDiff.AverageSquareDifference:F2} max={boardDiff.MaxSquareDifference:F2}";
@@ -1906,6 +1994,11 @@ partial class Program
 
                             MaybeRecoverStableSparseArrows();
                             ReconcileExternalArrowOverlay();
+                            // Geometry-drift self-heal runs OUTSIDE the reconciler:
+                            // the reconciler stands down on every mouse interaction,
+                            // and a user clicking around must not starve the very
+                            // repair they are waiting for.
+                            CheckExternalBoardGeometryDrift(DateTime.UtcNow);
                         }
                         phase2End = _perfStopwatch.ElapsedMilliseconds;
                         phase2Ms = phase2End - phase2Start;

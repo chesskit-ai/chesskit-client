@@ -658,6 +658,27 @@ partial class Program
             return;
         }
 
+        // Never fight the resize path: while the tracked window is resizing
+        // (grace window active), every frame clears arrows on purpose and a
+        // cache re-show here just races the UI thread's render token - the
+        // show gets dropped and this fires again next frame, log-spamming
+        // while the frozen pre-resize pixels stay on screen. Recover once
+        // after the resize settles instead.
+        if (!_currentFenIsAnalysisBoard && IsTrackedWindowResizeSettling())
+        {
+            _stableNoArrowSinceUtc = DateTime.MinValue;
+            return;
+        }
+
+        // The board is likely GONE (kingless-read streak: post-game screen /
+        // reload between games) - re-showing cached arrows would ghost the
+        // previous game's analysis over a non-game page.
+        if (!_currentFenIsAnalysisBoard && _kinglessReadStreak >= 2)
+        {
+            _stableNoArrowSinceUtc = DateTime.MinValue;
+            return;
+        }
+
         if (!_continuousAnalysisEnabled ||
             _analysisInProgress ||
             _orientationPromptVisible ||
@@ -746,6 +767,128 @@ partial class Program
         _pendingFenCandidateCount = 0;
         _pendingFenCandidateStartedUtc = DateTime.MinValue;
         _pendingFenCandidateLastSeenUtc = DateTime.MinValue;
+    }
+
+    // --- External/spectator consensus confirmation --------------------------
+    // On a WATCHED VIDEO (e.g. a bullet stream) the board reads jitter by a
+    // square or two every frame from H.264 compression, so the exact-match
+    // confirmation count AND the persistent-candidate escape never accumulate -
+    // each slightly-different read resets them - and the client stays locked on
+    // a stale board, drawing arrows for the wrong position. This builds a
+    // PER-SQUARE consensus over a short rolling window of recent external reads
+    // and accepts it once the window agrees strongly and stably. Jitter (a
+    // square that reads 'n' in 5/7 frames) gets voted out; a genuine board
+    // change drops cohesion until the window re-forms around the new board.
+    // External/spectator path ONLY - the user's own board keeps the strict gate.
+    private static readonly List<(string board, DateTime seen)> _externalConsensusWindow = new();
+    private static string _lastExternalConsensusBoard = "";
+    private static int _externalConsensusStableCount = 0;
+    private const int ExternalConsensusWindowSize = 8;
+    private const int ExternalConsensusMinReads = 6;
+    private const double ExternalConsensusMinSpanMs = 700;
+    private const int ExternalConsensusMaxSquareDiff = 3;
+    private const double ExternalConsensusMinAgreeFrac = 0.7;
+    private const int ExternalConsensusStableRepeats = 2;
+
+    private static void ResetExternalConsensus()
+    {
+        _externalConsensusWindow.Clear();
+        _lastExternalConsensusBoard = "";
+        _externalConsensusStableCount = 0;
+    }
+
+    private static string ExpandPlacement(string placement)
+    {
+        var sb = new System.Text.StringBuilder(64);
+        foreach (char c in placement)
+        {
+            if (c == '/') continue;
+            if (c >= '1' && c <= '8') sb.Append('.', c - '0');
+            else sb.Append(c);
+        }
+        return sb.Length == 64 ? sb.ToString() : "";
+    }
+
+    private static string CompactPlacement(string sq64)
+    {
+        var sb = new System.Text.StringBuilder();
+        for (int r = 0; r < 8; r++)
+        {
+            int empty = 0;
+            for (int f = 0; f < 8; f++)
+            {
+                char c = sq64[r * 8 + f];
+                if (c == '.') { empty++; continue; }
+                if (empty > 0) { sb.Append(empty); empty = 0; }
+                sb.Append(c);
+            }
+            if (empty > 0) sb.Append(empty);
+            if (r < 7) sb.Append('/');
+        }
+        return sb.ToString();
+    }
+
+    private static int PlacementSquareDiff(string aExpanded, string bExpanded)
+    {
+        int d = 0;
+        for (int i = 0; i < 64; i++) if (aExpanded[i] != bExpanded[i]) d++;
+        return d;
+    }
+
+    // Returns true (and the consensus FEN) once the rolling window of recent
+    // external reads agrees on a stable per-square board. Structurally-sane
+    // gate keeps a garbage consensus from ever being confirmed.
+    private static bool TryAcceptExternalConsensusBoard(string observedFen, out string acceptedFen)
+    {
+        acceptedFen = "";
+        string expanded = ExpandPlacement(GetBoardPosition(observedFen));
+        if (expanded.Length != 64) return false;
+
+        _externalConsensusWindow.Add((expanded, DateTime.UtcNow));
+        while (_externalConsensusWindow.Count > ExternalConsensusWindowSize)
+            _externalConsensusWindow.RemoveAt(0);
+        if (_externalConsensusWindow.Count < ExternalConsensusMinReads) return false;
+
+        var sq = new char[64];
+        for (int i = 0; i < 64; i++)
+        {
+            var counts = new Dictionary<char, int>(4);
+            foreach (var w in _externalConsensusWindow)
+            {
+                char c = w.board[i];
+                counts.TryGetValue(c, out int n); counts[c] = n + 1;
+            }
+            char best = '.'; int bestN = -1;
+            foreach (var kv in counts) if (kv.Value > bestN) { bestN = kv.Value; best = kv.Key; }
+            sq[i] = best;
+        }
+        string consensusExpanded = new string(sq);
+
+        int agree = 0;
+        foreach (var w in _externalConsensusWindow)
+            if (PlacementSquareDiff(w.board, consensusExpanded) <= ExternalConsensusMaxSquareDiff) agree++;
+        if ((double)agree / _externalConsensusWindow.Count < ExternalConsensusMinAgreeFrac)
+        {
+            _externalConsensusStableCount = 0;
+            return false;
+        }
+
+        if (string.Equals(consensusExpanded, _lastExternalConsensusBoard, StringComparison.Ordinal))
+            _externalConsensusStableCount++;
+        else { _lastExternalConsensusBoard = consensusExpanded; _externalConsensusStableCount = 1; }
+
+        double spanMs = (_externalConsensusWindow[^1].seen - _externalConsensusWindow[0].seen).TotalMilliseconds;
+        if (_externalConsensusStableCount < ExternalConsensusStableRepeats || spanMs < ExternalConsensusMinSpanMs)
+            return false;
+
+        int spIdx = observedFen.IndexOf(' ');
+        string suffix = spIdx >= 0 ? observedFen.Substring(spIdx) : " w - - 0 1";
+        string candidate = CompactPlacement(consensusExpanded) + suffix;
+        if (!UCIEngine.IsFenStructurallySane(candidate, out _)) return false;
+
+        acceptedFen = candidate;
+        ResetExternalConsensus();
+        return true;
     }
 
     private static void NoteCurrentExternalBoardObservation(string observedFen)
@@ -1137,7 +1280,21 @@ partial class Program
                 MarkAcceptedExternalBoardSwitch(confirmedFen, boardSwitchChangedSquares, confirmationMs);
             }
             ResetPendingFenCandidate();
+            ResetExternalConsensus();
             return confirmedFen;
+        }
+
+        // Jitter-tolerant fallback for watched video / spectator boards: the
+        // exact-match count above never accumulates when reads jitter a square
+        // or two per frame (compression), so build a per-square consensus and
+        // accept it once the window agrees. External path only - the user's own
+        // board confirms via the strict count above and won't reach here.
+        if (needsStableNonLegalExternalConfirmation &&
+            TryAcceptExternalConsensusBoard(observedFen, out string consensusFen))
+        {
+            Log($"[FEN] external consensus accepted (jitter-tolerant) board={GetBoardPosition(consensusFen)}");
+            ResetPendingFenCandidate();
+            return consensusFen;
         }
 
         TraceBoard($"ignored pending count={_pendingFenCandidateCount}/{requiredConfirmations} raw={GetBoardPosition(observedFen)}");
@@ -1231,7 +1388,29 @@ partial class Program
         }
 
         changedSquares = CountChangedBoardSquares(currentBoard, observedBoard);
-        return changedSquares >= ExternalBoardSwitchChangedSquaresThreshold;
+        if (changedSquares < ExternalBoardSwitchChangedSquaresThreshold)
+            return false;
+
+        // A genuine board-context switch lands on a real position, which always
+        // has both kings. Transient vision misreads that vaporize the board
+        // (raw=8/8/8/8/8/8/8/8) or garble it into a partial board missing a king
+        // are NOT switches - clearing arrows on them makes the overlay flicker as
+        // the next good frame redraws, and can spuriously reset orientation
+        // state. Require both kings before treating a large content delta as a
+        // switch - UNLESS the kingless reads have persisted long enough to mean
+        // the board is genuinely gone (post-game screen / page reload between
+        // bullet games): then the jump must go through so the stale arrows clear
+        // instead of ghosting over the non-game page.
+        if (observedBoard.IndexOf('K') < 0 || observedBoard.IndexOf('k') < 0)
+        {
+            if (_kinglessReadStreak < KinglessBoardGoneStreak)
+            {
+                changedSquares = 0;
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static bool IsLargeExternalBoardSwitchCandidate(
@@ -1287,6 +1466,7 @@ partial class Program
 
     private static void MarkAcceptedExternalBoardSwitch(string confirmedFen, int changedSquares, double confirmationMs)
     {
+        _kinglessReadStreak = 0; // a switch was accepted: a real board is present
         _acceptedExternalBoardSwitchFen = confirmedFen;
         _acceptedExternalBoardSwitchUntilUtc = DateTime.UtcNow.AddMilliseconds(ExternalBoardSwitchAcceptWindowMs);
 

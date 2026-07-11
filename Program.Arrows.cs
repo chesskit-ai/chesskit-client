@@ -91,6 +91,162 @@ partial class Program
         RefreshDisplayedArrows();
     }
 
+    // Detects the tracked board rect drifting out from under the arrows using
+    // the board box the server reports on every fen response (normalized to the
+    // sent crop: healthy fill ~1.0, offset ~0). The blind spot this covers: the
+    // on-screen board resized IN PLACE (site board-resize handle) - window rect
+    // unchanged, FEN still reading fine, so none of the board-probe triggers
+    // fire and the arrows stay misaligned on the stale rect forever. Two
+    // consecutive drifting fen responses schedule a board re-verify through the
+    // normal tracking path (_requestBoardRefresh + _scheduledVerifyUtc), which
+    // re-anchors with all of its existing sanity checks and damping.
+    private static void CheckExternalBoardGeometryDrift(DateTime now)
+    {
+        // Standalone guards (this runs from the main loop, NOT inside the
+        // mouse-gated arrow reconciler): geometry repair must not be starved
+        // by the user clicking around - that only delays the fix they are
+        // waiting for. It needs a tracked external board and analysis on;
+        // it deliberately does NOT require arrows to be currently showing.
+        if (!_continuousAnalysisEnabled ||
+            _currentFenIsAnalysisBoard ||
+            IsActiveAnalysisBoardFen(_currentFEN) ||
+            IsExternalBoardOutputSuspended() ||
+            !_lastTrackedBox.HasValue)
+        {
+            return;
+        }
+
+        if (IsTrackedWindowResizeSettling())
+            return;
+        if (now < _lastGeometryDriftVerifyUtc.AddMilliseconds(_geometryDriftCooldownMs))
+            return;
+
+        var sample = BoardVisionDetector.GetLastVisionFenBoardObservation(GeometryDriftSampleMaxAgeMs);
+        if (sample == null)
+            return;
+
+        var s = sample.Value;
+        if (s.Seq == _lastGeometryDriftSampleSeq)
+            return; // one vote per fen response
+        _lastGeometryDriftSampleSeq = s.Seq;
+
+        bool drifted =
+            s.FillX < GeometryDriftMinFill || s.FillY < GeometryDriftMinFill ||
+            s.OffsetX > GeometryDriftMaxOffset || s.OffsetY > GeometryDriftMaxOffset;
+        if (!drifted)
+        {
+            // Healthy geometry: clear the streak AND the fruitless-verify
+            // backoff - the next real drift starts from the fast cooldown.
+            _geometryDriftStreak = 0;
+            _geometryDriftCooldownMs = GeometryDriftVerifyCooldownMs;
+
+            // Fine-trim accumulation: the sample's centering bias (how far the
+            // fen board box sits from the crop's centre) exposes a constant
+            // acquisition-box offset once jitter is averaged out. dxFrac uses
+            // the sample's own fill as the margin estimate, so it is margin-
+            // independent: a perfectly anchored board gives ~0.
+            double dxFrac = s.OffsetX - (1.0 - s.FillX) / 2.0;
+            double dyFrac = s.OffsetY - (1.0 - s.FillY) / 2.0;
+            _geometryTrimDxSum += dxFrac;
+            _geometryTrimDySum += dyFrac;
+            if (++_geometryTrimCount >= GeometryTrimMinSamples)
+            {
+                var box = _lastTrackedBox.Value;
+                double dxPx = _geometryTrimDxSum / _geometryTrimCount * box.Width;
+                double dyPx = _geometryTrimDySum / _geometryTrimCount * box.Height;
+                _geometryTrimDxSum = 0;
+                _geometryTrimDySum = 0;
+                _geometryTrimCount = 0;
+                if (now >= _lastGeometryTrimUtc.AddMilliseconds(GeometryTrimCooldownMs) &&
+                    (Math.Abs(dxPx) >= GeometryTrimMinPx || Math.Abs(dyPx) >= GeometryTrimMinPx) &&
+                    Math.Abs(dxPx) <= GeometryTrimMaxPx &&
+                    Math.Abs(dyPx) <= GeometryTrimMaxPx)
+                {
+                    ApplyExternalBoardFineTrim((int)Math.Round(dxPx), (int)Math.Round(dyPx));
+                    _lastGeometryTrimUtc = now;
+                }
+            }
+            return;
+        }
+
+        // SEVERE drift is unmistakable from one sample - fire immediately.
+        // Mild drift (near the noise threshold) still needs the 2-vote quorum.
+        bool severe =
+            s.FillX < GeometryDriftSevereFill || s.FillY < GeometryDriftSevereFill ||
+            s.OffsetX > GeometryDriftSevereOffset || s.OffsetY > GeometryDriftSevereOffset;
+
+        // Two votes must be reasonably close together to count as consecutive;
+        // a stale streak (previous window/crop, or minutes-old) restarts.
+        _geometryDriftStreak = now <= _geometryDriftStreakLastUtc.AddMilliseconds(GeometryDriftStreakMaxGapMs)
+            ? _geometryDriftStreak + 1
+            : 1;
+        _geometryDriftStreakLastUtc = now;
+
+        if (!severe && _geometryDriftStreak < GeometryDriftStreakRequired)
+            return; // first mild vote; the fen heartbeat now forces the confirming probe
+
+        _geometryDriftStreak = 0;
+        _lastGeometryDriftVerifyUtc = now;
+        // Backoff doubles per fire and only a healthy sample resets it: a real
+        // drift is healed by the verify (next samples healthy -> reset), while
+        // a systematic fen-vs-board box disagreement decays to a rare probe
+        // instead of hammering full-screen scans every cooldown.
+        _geometryDriftCooldownMs = Math.Min(_geometryDriftCooldownMs * 2, GeometryDriftVerifyCooldownMaxMs);
+        _requestBoardRefresh = true;
+        _scheduledVerifyUtc = DateTime.UtcNow;
+        // Confirmed-wrong geometry: let the corrective board detect through on
+        // a fast budget instead of the routine 20s polling budget.
+        _geometryDriftVerifyPendingUntilUtc = now.AddMilliseconds(GeometryDriftVerifyFastWindowMs);
+        Log($"[WINTRACK] Board geometry drift detected (fen boardRect fill={s.FillX:F2}x{s.FillY:F2} offset={s.OffsetX:F2},{s.OffsetY:F2}); scheduling board re-verify (next drift cooldown {_geometryDriftCooldownMs}ms)");
+    }
+
+    // Position-only nudge of the tracked anchor toward the median fen-response
+    // board box. Runs on the main loop (same thread as every other tracking
+    // write). Size is untouched - size errors are the drift path's job.
+    private static void ApplyExternalBoardFineTrim(int dxPx, int dyPx)
+    {
+        if ((dxPx == 0 && dyPx == 0) ||
+            !_lastTrackedBox.HasValue ||
+            _trackedHwnd == IntPtr.Zero ||
+            !WindowTracker.TryGetWindowRect(_trackedHwnd, out var winRect))
+        {
+            return;
+        }
+
+        var box = _lastTrackedBox.Value;
+        var trimmed = new Rect(box.X + dxPx, box.Y + dyPx, box.Width, box.Height);
+        _lastTrackedBox = trimmed;
+        _boardOffsetInWindow = WindowTracker.ComputeOffset(trimmed, winRect);
+        UpdateBoardWindowProjection(trimmed, winRect);
+        if (_overlay != null)
+        {
+            _overlay.BeginInvoke(new Action(() =>
+                _overlay.SetBoardScreenPosition(new Rectangle(trimmed.X, trimmed.Y, trimmed.Width, trimmed.Height))));
+        }
+        Log($"[WINTRACK] fine-trim applied dx={dxPx} dy={dyPx} (fen-grid median centering) box={trimmed.X},{trimmed.Y} {trimmed.Width}x{trimmed.Height}");
+    }
+
+    // Drift votes are only meaningful against the crop they were measured on.
+    // Called whenever the tracked rect is re-anchored, the tracked window
+    // switches, or tracking detaches: clears the streak, restores the fast
+    // cooldown, and consumes any sample recorded against the OLD crop so it
+    // cannot vote against the new rect.
+    private static void ResetGeometryDriftState()
+    {
+        _geometryDriftStreak = 0;
+        _geometryDriftStreakLastUtc = DateTime.MinValue;
+        _geometryDriftCooldownMs = GeometryDriftVerifyCooldownMs;
+        _geometryDriftVerifyPendingUntilUtc = DateTime.MinValue;
+        _geometryTrimDxSum = 0;
+        _geometryTrimDySum = 0;
+        _geometryTrimCount = 0;
+        var stale = BoardVisionDetector.GetLastVisionFenBoardObservation(int.MaxValue);
+        if (stale.HasValue)
+        {
+            _lastGeometryDriftSampleSeq = stale.Value.Seq;
+        }
+    }
+
     // Coach-mode counterpart of the arrow reconciler: re-assert the last stable
     // coach overlay for the CURRENT confirmed board with an un-droppable
     // generation, so a dropped coach show cannot freeze stale marks on screen.
