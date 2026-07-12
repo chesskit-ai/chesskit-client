@@ -175,10 +175,10 @@ partial class Program
             : NormalizeExternalDisplayedVariationDepths(result.Variations, displayedResultDepth);
 
         _lastAnalysisVariations = displayVariations;
-        if (!isAnalysisBoardPosition && result.Variations.Count < Math.Min(_maxArrowCount, 5))
+        if (!isAnalysisBoardPosition && result.Variations.Count < _maxArrowCount)
         {
             Log(
-                $"[{DateTime.Now:HH:mm:ss}] Engine returned {result.Variations.Count}/{Math.Min(_maxArrowCount, 5)} requested lines " +
+                $"[{DateTime.Now:HH:mm:ss}] Engine returned {result.Variations.Count}/{_maxArrowCount} requested lines " +
                 $"for {stageLabel} result at depth {GetBestResultDepth(result)}");
         }
 
@@ -335,11 +335,11 @@ partial class Program
 
         var arrows = new List<MoveArrow>();
         int strength = 1;
-        // Display cap stays at 5/_maxArrowCount even when the Bullet profile
+        // Display cap stays at _maxArrowCount even when the Bullet profile
         // requests MultiPV 10 - lines beyond the cap feed the PV cache
         // (PopulateAnalysisPvCache sees the full variation list), not the
         // screen.
-        int arrowsToShow = Math.Min(_maxArrowCount, Math.Min(displayVariations.Count, 5));
+        int arrowsToShow = Math.Min(_maxArrowCount, displayVariations.Count);
 
         foreach (var variation in displayVariations.Take(arrowsToShow))
         {
@@ -1891,7 +1891,7 @@ partial class Program
         var arrows = new List<MoveArrow>();
         int strength = 1;
 
-        foreach (var variation in variations.Take(Math.Min(maxArrowCount, 5)))
+        foreach (var variation in variations.Take(Math.Min(maxArrowCount, BuildLimits.MaxLines)))
         {
             if (!variation.Moves.Any())
                 continue;
@@ -2750,12 +2750,7 @@ partial class Program
                 _analysisTimer?.Dispose();
 
                 _analysisTimer = new System.Threading.Timer(
-                    _ => {
-                        if (_continuousAnalysisEnabled && !string.IsNullOrEmpty(_currentFEN))
-                        {
-                            TryQueueAnalysis(_analysisIsBlackPerspective);
-                        }
-                    },
+                    _ => RunContinuousAnalysisTimerTick(),
                     null,
                     TimeSpan.FromMilliseconds(500),
                     TimeSpan.FromMilliseconds(250)
@@ -2817,13 +2812,7 @@ partial class Program
 
             _analysisTimer?.Dispose();
             _analysisTimer = new System.Threading.Timer(
-                _ =>
-                {
-                    if (_continuousAnalysisEnabled && !string.IsNullOrEmpty(_currentFEN))
-                    {
-                        TryQueueAnalysis(_analysisIsBlackPerspective);
-                    }
-                },
+                _ => RunContinuousAnalysisTimerTick(),
                 null,
                 TimeSpan.FromMilliseconds(500),
                 TimeSpan.FromMilliseconds(250)
@@ -2849,6 +2838,26 @@ partial class Program
             {
                 TryQueueAnalysis(_analysisIsBlackPerspective, force: true);
             }
+        }
+    }
+
+    private static void RunContinuousAnalysisTimerTick()
+    {
+        try
+        {
+            if (_continuousAnalysisEnabled && !string.IsNullOrEmpty(_currentFEN))
+            {
+                TryQueueAnalysis(_analysisIsBlackPerspective);
+            }
+        }
+        catch (Exception ex)
+        {
+            ReportTimerCallbackException(
+                ref _lastContinuousAnalysisTimerExceptionTick,
+                "[ANALYSIS TIMER] Callback failed",
+                "ContinuousAnalysisTimer",
+                ex,
+                Log);
         }
     }
 

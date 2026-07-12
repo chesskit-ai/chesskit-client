@@ -1237,19 +1237,16 @@ partial class Program
 
     private static void ApplyExternalBoardVisualFlip(Mat boardView, string reason)
     {
-        _externalBoardDetectedFlipped = !_externalBoardDetectedFlipped;
+        bool orientationChanged = ApplyExternalDisplayOrientation(
+            !_externalBoardDetectedFlipped,
+            $"visual rotation ({reason})",
+            authoritativeObservation: true);
         UpdateConfirmedBoardSnapshot(boardView);
         ResetPendingFenCandidate();
-        ResetAnalysisSchedulingState();
 
-        // Keep cached engine arrows, but force their screen projection to be rebuilt
-        // against the newly observed board orientation.
-        RefreshDisplayedArrows();
-        bool requestedPerspective = GetRequestedAnalysisPerspective(_currentFEN, _analysisIsBlackPerspective);
-        TryQueueAnalysis(requestedPerspective, force: true);
-        if (!_currentFenIsAnalysisBoard && !string.IsNullOrWhiteSpace(_currentFEN))
+        if (orientationChanged)
         {
-            _analysisBoardController!.MirrorExternalFen(ApplyInferredExternalTurnToFen(_currentFEN), _externalBoardDetectedFlipped, force: true);
+            HandleExternalDisplayOrientationChanged("external board visual rotation");
         }
 
         Log($"[{DateTime.Now:HH:mm:ss}] External board visual flip detected from {reason} -> flipped={_externalBoardDetectedFlipped}");
@@ -1395,13 +1392,18 @@ partial class Program
         return _externalBoardDetectedFlipped;
     }
 
-    private static bool ApplyExternalDisplayOrientation(bool? observedFlipped, string reason)
+    private static bool ApplyExternalDisplayOrientation(
+        bool? observedFlipped,
+        string reason,
+        bool authoritativeObservation = false)
     {
         if (!observedFlipped.HasValue)
             return false;
 
         bool observed = observedFlipped.Value;
-        if (_externalOrientationLockedForCurrentGame && _externalBoardDetectedFlipped != observed)
+        if (_externalOrientationLockedForCurrentGame &&
+            _externalBoardDetectedFlipped != observed &&
+            !authoritativeObservation)
         {
             TraceBoard(
                 $"orientation display kept locked flipped={_externalBoardDetectedFlipped} " +
@@ -1409,12 +1411,98 @@ partial class Program
             return false;
         }
 
-        if (_externalBoardDetectedFlipped == observed)
-            return false;
+        bool changed = _externalBoardDetectedFlipped != observed;
+        if (_externalOrientationLockedForCurrentGame && changed && authoritativeObservation)
+        {
+            TraceBoard(
+                $"orientation display corrected despite stale lock old={_externalBoardDetectedFlipped} " +
+                $"observed={observed} ({reason})");
+        }
 
         _externalBoardDetectedFlipped = observed;
+        if (authoritativeObservation)
+        {
+            _orientationConfirmStreakFlipped = observed;
+            _orientationConfirmStreakCount = OrientationLockStreakThreshold;
+            _externalOrientationLockedForCurrentGame = true;
+        }
+        else if (!_externalOrientationLockedForCurrentGame)
+        {
+            // Only accepted, geometry-stable observations contribute to the
+            // lock streak. Resolver calls also run while geometry is moving;
+            // counting those let transitional frames lock a stale display.
+            if (_orientationConfirmStreakFlipped == observed)
+            {
+                _orientationConfirmStreakCount++;
+            }
+            else
+            {
+                _orientationConfirmStreakFlipped = observed;
+                _orientationConfirmStreakCount = 1;
+            }
+
+            if (_orientationConfirmStreakCount >= OrientationLockStreakThreshold)
+            {
+                _externalOrientationLockedForCurrentGame = true;
+            }
+        }
+
+        SyncExternalDisplayOrientationState();
+        if (!changed)
+            return false;
+
         TraceBoard($"orientation display updated flipped={observed} ({reason})");
         return true;
+    }
+
+    private static void SyncExternalDisplayOrientationState()
+    {
+        _boardIsFlipped = _externalBoardDetectedFlipped;
+        _settingsToolbar?.SyncBoardFlippedState(_externalBoardDetectedFlipped);
+        _evalBar?.SetBoardFlipped(_externalBoardDetectedFlipped);
+    }
+
+    private static void HandleExternalDisplayOrientationChanged(string reason)
+    {
+        if (string.IsNullOrWhiteSpace(_currentFEN) ||
+            _currentFenIsAnalysisBoard ||
+            IsActiveAnalysisBoardFen(_currentFEN))
+        {
+            return;
+        }
+
+        // Any in-flight result captured the old display orientation. Cancel it
+        // before reprojecting cached arrows so a late UI callback cannot paint
+        // the previous orientation back over the corrected one.
+        CancelPendingAnalysis(reason);
+
+        SyncExternalDisplayOrientationState();
+
+        if (_coachModeEnabled)
+        {
+            // Coach marks embed their display coordinates. They cannot be
+            // reprojected from _currentMoveArrows, so hide and rebuild them.
+            ClearActiveArrows(reason);
+        }
+        else
+        {
+            // Supersede queued old-orientation paints while keeping the
+            // current engine result available for an immediate redraw.
+            Interlocked.Increment(ref _arrowDisplayGeneration);
+            RefreshDisplayedArrows();
+        }
+
+        _analysisBoardController?.MirrorExternalFen(
+            ApplyInferredExternalTurnToFen(_currentFEN),
+            _externalBoardDetectedFlipped,
+            force: true);
+
+        ResetAnalysisSchedulingState();
+        if (_continuousAnalysisEnabled)
+        {
+            bool requestedPerspective = GetRequestedAnalysisPerspective(_currentFEN, _analysisIsBlackPerspective);
+            TryQueueAnalysis(requestedPerspective, force: true);
+        }
     }
 
     private static bool ShouldBypassWaitingForExternalBothMode(string fen)

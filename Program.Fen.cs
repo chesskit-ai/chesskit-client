@@ -468,7 +468,7 @@ partial class Program
                 return false;
             }
 
-            if (!TryResolveOrientationDecision(_currentFEN, IsActiveAnalysisBoardFen(_currentFEN), GetOrientationPromptReferenceColor(_currentFEN), out _))
+            if (!TryResolveOrientationDecision(_currentFEN, IsActiveAnalysisBoardFen(_currentFEN), GetOrientationPromptReferenceColor(_currentFEN), out _, out _))
             {
                 LogDiag("ENGINE", "analysis queue skipped: orientation unresolved");
                 return false;
@@ -2226,7 +2226,7 @@ partial class Program
         if (HasUnresolvedOrientationPromptForCurrentPosition())
             return false;
 
-        if (!TryResolveOrientationDecision(_currentFEN, IsActiveAnalysisBoardFen(_currentFEN), GetOrientationPromptReferenceColor(_currentFEN), out _))
+        if (!TryResolveOrientationDecision(_currentFEN, IsActiveAnalysisBoardFen(_currentFEN), GetOrientationPromptReferenceColor(_currentFEN), out _, out _))
             return false;
 
         char requestedColor = GetAnalysisSideForFen(_currentFEN, _analysisIsBlackPerspective);

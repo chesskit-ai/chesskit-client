@@ -1462,7 +1462,7 @@ namespace ChessKit
             {
                 foreach (var arrow in _analysisArrows.OrderByDescending(a => a.Strength))
                 {
-                    DrawAnalysisArrow(g, arrow, squareSize);
+                    DrawAnalysisArrow(g, arrow, _analysisArrows.Count, squareSize);
                     DrawAnalysisPromotionHint(g, arrow, squareSize);
                 }
             }
@@ -2128,7 +2128,7 @@ namespace ChessKit
             }
         }
 
-        private void DrawAnalysisArrow(Graphics g, MoveArrow arrow, int squareSize)
+        private void DrawAnalysisArrow(Graphics g, MoveArrow arrow, int totalArrowCount, int squareSize)
         {
             float fromX, fromY, toX, toY;
 
@@ -2168,38 +2168,24 @@ namespace ChessKit
             float widthScale = Math.Clamp(compressedScale, 0.66f, 1.12f);
             float lengthScale = Math.Clamp(compressedScale * 0.99f, 0.62f, 1.06f);
 
-            Color arrowColor;
-            float thickness;
-            float headWidth;
-            float headLength;
-
-            switch (arrow.Strength)
-            {
-                case 1:
-                    thickness = Math.Clamp(squareSize * 0.19f, 7.6f, 13.8f);
-                    arrowColor = Color.FromArgb(118, 38, 84, 132);
-                    headWidth = 4.25f * widthScale;
-                    headLength = 3.9f * lengthScale;
-                    break;
-                case 2:
-                    thickness = Math.Clamp(squareSize * 0.14f, 5.4f, 8.8f);
-                    arrowColor = Color.FromArgb(102, 38, 84, 132);
-                    headWidth = 3.35f * widthScale;
-                    headLength = 2.95f * lengthScale;
-                    break;
-                case 3:
-                    thickness = Math.Clamp(squareSize * 0.104f, 4.2f, 6.6f);
-                    arrowColor = Color.FromArgb(88, 38, 84, 132);
-                    headWidth = 2.85f * widthScale;
-                    headLength = 2.5f * lengthScale;
-                    break;
-                default:
-                    thickness = Math.Clamp(squareSize * 0.086f, 3.7f, 5.8f);
-                    arrowColor = Color.FromArgb(78, 38, 84, 132);
-                    headWidth = 2.5f * widthScale;
-                    headLength = 2.25f * lengthScale;
-                    break;
-            }
+            float prominence = ArrowRankScale.GetProminence(arrow.Strength, totalArrowCount);
+            float strongestThickness = Math.Clamp(squareSize * 0.19f, 7.6f, 13.8f);
+            float weakestThickness = Math.Clamp(squareSize * 0.086f, 3.7f, 5.8f);
+            float thickness = ArrowRankScale.Lerp(weakestThickness, strongestThickness, prominence);
+            float weakestHeadWidthPixels = weakestThickness * 2.5f * widthScale;
+            float strongestHeadWidthPixels = strongestThickness * 4.25f * widthScale;
+            float weakestHeadLengthPixels = weakestThickness * 2.25f * lengthScale;
+            float strongestHeadLengthPixels = strongestThickness * 3.9f * lengthScale;
+            float headWidth = ArrowRankScale.Lerp(
+                weakestHeadWidthPixels,
+                strongestHeadWidthPixels,
+                prominence) / thickness;
+            float headLength = ArrowRankScale.Lerp(
+                weakestHeadLengthPixels,
+                strongestHeadLengthPixels,
+                prominence) / thickness;
+            int alpha = (int)MathF.Round(ArrowRankScale.Lerp(78f, 118f, prominence));
+            Color arrowColor = Color.FromArgb(alpha, 38, 84, 132);
 
             using var pen = new Pen(arrowColor, thickness);
             pen.StartCap = LineCap.Round;
@@ -5606,5 +5592,3 @@ namespace ChessKit
         }
     }
 }
-
-

@@ -30,6 +30,11 @@ namespace ChessKit
         // Keep all layout rectangles in 96-DPI logical units and scale the
         // form bounds / paint surface / mouse coordinates at the edge.
         private float _uiScale = 1f;
+        private bool _regionSignatureValid = false;
+        private Size _lastRegionClientSize = Size.Empty;
+        private bool _lastRegionDocked = false;
+        private int _lastRegionContentOffsetX = 0;
+        private float _lastRegionUiScale = 0f;
 
         // Engine management fields
         private EngineManager? _engineManager;
@@ -1216,6 +1221,7 @@ namespace ChessKit
 
             RefreshDpiScale();
             InitializeLabelMeasurements();
+            _regionSignatureValid = false;
             ResizeToolbarForCurrentDpi();
         }
 
@@ -1224,6 +1230,7 @@ namespace ChessKit
             base.OnDpiChanged(e);
             RefreshDpiScale();
             InitializeLabelMeasurements();
+            _regionSignatureValid = false;
             ResizeToolbarForCurrentDpi();
         }
 
@@ -1414,8 +1421,19 @@ namespace ChessKit
         /// </summary>
         private void UpdateFormRegion()
         {
+            Size clientSize = ClientSize;
+            if (_regionSignatureValid &&
+                clientSize == _lastRegionClientSize &&
+                _isDockedToWindow == _lastRegionDocked &&
+                _dockedContentOffsetX == _lastRegionContentOffsetX &&
+                Math.Abs(_uiScale - _lastRegionUiScale) < 0.0001f)
+            {
+                return;
+            }
+
             try
             {
+                Region? replacement = null;
                 if (_isDockedToWindow)
                 {
                     int tcr = _dockedContentOffsetX;
@@ -1429,12 +1447,21 @@ namespace ChessKit
                     using var matrix = new Matrix();
                     matrix.Scale(_uiScale, _uiScale);
                     scaledPath.Transform(matrix);
-                    Region = new Region(scaledPath);
+                    replacement = new Region(scaledPath);
                 }
-                else
+
+                Region? oldRegion = Region;
+                Region = replacement;
+                if (!ReferenceEquals(oldRegion, replacement))
                 {
-                    Region = null; // rectangular
+                    oldRegion?.Dispose();
                 }
+
+                _lastRegionClientSize = clientSize;
+                _lastRegionDocked = _isDockedToWindow;
+                _lastRegionContentOffsetX = _dockedContentOffsetX;
+                _lastRegionUiScale = _uiScale;
+                _regionSignatureValid = true;
             }
             catch { /* defensive - never break the form on a region issue */ }
         }
@@ -2616,7 +2643,7 @@ namespace ChessKit
             // all subsequent drawing happens within the visible area, then
             // restore. Hit-testing handles the same shift in WndProc by
             // subtracting _dockedContentOffsetX from mouse coordinates.
-            var savedTransform = g.Transform;
+            using var savedTransform = g.Transform;
             if (_dockedContentOffsetX != 0)
             {
                 g.TranslateTransform(_dockedContentOffsetX, 0);
@@ -3225,7 +3252,7 @@ namespace ChessKit
                 }
             }
 
-            var textFormat = new StringFormat
+            using var textFormat = new StringFormat
             {
                 Alignment = StringAlignment.Center,
                 LineAlignment = StringAlignment.Center
@@ -4655,7 +4682,6 @@ namespace ChessKit
         }
     }
 }
-
 
 
 

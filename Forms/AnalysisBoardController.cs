@@ -161,6 +161,7 @@ namespace ChessKit
         private int _analysisBoardMatchAnalysisPreviewVersion = 0;
         private System.Threading.Timer? _analysisBoardMatchTimer = null;
         private int _analysisBoardMatchSessionVersion = 0;
+        private long _lastAnalysisBoardMatchTimerExceptionTick = -1;
         private long _analysisBoardMatchWhiteRemainingMs = 180000;
         private long _analysisBoardMatchBlackRemainingMs = 180000;
         private DateTime _analysisBoardMatchTurnStartedUtc = DateTime.MinValue;
@@ -173,6 +174,7 @@ namespace ChessKit
         private bool _analysisBoardAnalysisEnabled = false;
         private string _analysisBoardAnalysisMode = "OFF";
         private System.Threading.Timer? _analysisBoardAnalysisTimer = null;
+        private long _lastAnalysisBoardTimerExceptionTick = -1;
         private bool _analysisBoardAnalysisInProgress = false;
         private string _analysisBoardLastAnalysisKey = "";
         private bool _analysisBoardAnalysisRestartPending = false;
@@ -325,7 +327,7 @@ namespace ChessKit
             _analysisBoardAnalysisEnabled = true;
             int sessionVersion = _analysisBoardAnalysisSessionVersion;
             _analysisBoardAnalysisTimer = new System.Threading.Timer(
-                _ => TryQueueAnalysisBoardAnalysis(sessionVersion),
+                _ => RunAnalysisBoardTimerTick(sessionVersion),
                 null,
                 TimeSpan.FromMilliseconds(80),
                 TimeSpan.FromMilliseconds(300));
@@ -507,7 +509,7 @@ namespace ChessKit
                 int sessionVersion = _analysisBoardAnalysisSessionVersion;
                 _analysisBoardAnalysisTimer?.Dispose();
                 _analysisBoardAnalysisTimer = new System.Threading.Timer(
-                    _ => TryQueueAnalysisBoardAnalysis(sessionVersion),
+                    _ => RunAnalysisBoardTimerTick(sessionVersion),
                     null,
                     TimeSpan.FromMilliseconds(80),
                     TimeSpan.FromMilliseconds(_analysisBoardEngineInfinite ? 500 : 300));
@@ -1288,7 +1290,7 @@ namespace ChessKit
                 _analysisBoardMatchStarting = false;
                 _analysisBoardMatchMoveInProgress = false;
                 _analysisBoardMatchTurnStartedUtc = DateTime.UtcNow;
-                _analysisBoardMatchTimer = new System.Threading.Timer(_ => TickAnalysisBoardMatch(sessionVersion), null, TimeSpan.Zero, TimeSpan.FromMilliseconds(100));
+                _analysisBoardMatchTimer = new System.Threading.Timer(_ => RunAnalysisBoardMatchTimerTick(sessionVersion), null, TimeSpan.Zero, TimeSpan.FromMilliseconds(100));
                 UpdateAnalysisBoardMatchDisplay("Ready.");
             }
             catch (Exception ex)
@@ -1362,7 +1364,7 @@ namespace ChessKit
                 _analysisBoardMatchSessionVersion++;
                 int sessionVersion = _analysisBoardMatchSessionVersion;
                 _analysisBoardMatchTimer?.Dispose();
-                _analysisBoardMatchTimer = new System.Threading.Timer(_ => TickAnalysisBoardMatch(sessionVersion), null, TimeSpan.Zero, TimeSpan.FromMilliseconds(100));
+                _analysisBoardMatchTimer = new System.Threading.Timer(_ => RunAnalysisBoardMatchTimerTick(sessionVersion), null, TimeSpan.Zero, TimeSpan.FromMilliseconds(100));
                 UpdateAnalysisBoardMatchDisplay("Match resumed.");
                 return;
             }
@@ -1499,7 +1501,7 @@ namespace ChessKit
             _analysisBoardMatchSessionVersion++;
 
             int sessionVersion = _analysisBoardMatchSessionVersion;
-            _analysisBoardMatchTimer = new System.Threading.Timer(_ => TickAnalysisBoardMatch(sessionVersion), null, TimeSpan.Zero, TimeSpan.FromMilliseconds(100));
+            _analysisBoardMatchTimer = new System.Threading.Timer(_ => RunAnalysisBoardMatchTimerTick(sessionVersion), null, TimeSpan.Zero, TimeSpan.FromMilliseconds(100));
             Log($"[MATCH] Next game started | session={sessionVersion} baseSeconds={_analysisBoardMatchBaseSeconds}");
             UpdateAnalysisBoardMatchDisplay("Match running.");
         }
@@ -1538,10 +1540,44 @@ namespace ChessKit
             if (wasRunning)
             {
                 int sessionVersion = _analysisBoardMatchSessionVersion;
-                _analysisBoardMatchTimer = new System.Threading.Timer(_ => TickAnalysisBoardMatch(sessionVersion), null, TimeSpan.Zero, TimeSpan.FromMilliseconds(100));
+                _analysisBoardMatchTimer = new System.Threading.Timer(_ => RunAnalysisBoardMatchTimerTick(sessionVersion), null, TimeSpan.Zero, TimeSpan.FromMilliseconds(100));
             }
 
             UpdateAnalysisBoardMatchDisplay(wasRunning ? "Ready." : (resetScore ? "Match restarted." : "Game restarted."));
+        }
+
+        private void RunAnalysisBoardTimerTick(int sessionVersion)
+        {
+            try
+            {
+                TryQueueAnalysisBoardAnalysis(sessionVersion);
+            }
+            catch (Exception ex)
+            {
+                global::Program.ReportTimerCallbackException(
+                    ref _lastAnalysisBoardTimerExceptionTick,
+                    "[ANALYSIS BOARD TIMER] Callback failed",
+                    "AnalysisBoardTimer",
+                    ex,
+                    Log);
+            }
+        }
+
+        private void RunAnalysisBoardMatchTimerTick(int sessionVersion)
+        {
+            try
+            {
+                TickAnalysisBoardMatch(sessionVersion);
+            }
+            catch (Exception ex)
+            {
+                global::Program.ReportTimerCallbackException(
+                    ref _lastAnalysisBoardMatchTimerExceptionTick,
+                    "[MATCH TIMER] Callback failed",
+                    "AnalysisBoardMatchTimer",
+                    ex,
+                    Log);
+            }
         }
 
         private void TickAnalysisBoardMatch(int sessionVersion)

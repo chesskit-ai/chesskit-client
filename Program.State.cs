@@ -206,6 +206,26 @@ partial class Program
     private static double _currentFps = 0;
     private static double _currentFenPerSec = 0;
     private static DateTime _lastPerfUpdate = DateTime.UtcNow;
+    private static DateTime _lastMainLoopExceptionRecordUtc = DateTime.MinValue;
+    private static long _lastContinuousAnalysisTimerExceptionTick = -1;
+
+    // The renderer/message pump lives on a dedicated STA thread while the
+    // vision loop runs on Main. If that pump ever dies, stop the vision loop
+    // as well instead of leaving an invisible background process behind.
+    private static volatile bool _uiMessageLoopStopped = false;
+    private static volatile bool _uiShutdownExpected = false;
+    private static Exception? _uiThreadFailure = null;
+
+    // The tracking loop can run at 60+ FPS on a GPU machine. Positioning the
+    // WinForms overlays is asynchronous, so dispatch only actual geometry
+    // changes; otherwise identical BeginInvoke callbacks can outrun the UI
+    // thread and retain native/GDI resources for minutes.
+    private static Rectangle _lastEvalBarPositionRect = Rectangle.Empty;
+    private static Rectangle _lastEngineLinesPositionRect = Rectangle.Empty;
+    private static Rectangle _lastOverlayPositionRect = Rectangle.Empty;
+    private static Rectangle _lastToolbarPositionRect = Rectangle.Empty;
+    private static bool _lastToolbarPositionUsedWindow = false;
+    private static bool _hasLastToolbarPosition = false;
 
     // === FPS DIAGNOSTICS ===
     // === DIAGNOSTIC LOGGING ===
@@ -1137,27 +1157,53 @@ partial class Program
         catch { /* diagnostics must never block startup */ }
     }
 
-    private static void WriteCrashRecord(string source, Exception? ex, bool terminating)
+    internal static void WriteCrashRecord(string source, Exception? ex, bool terminating)
     {
-        try
-        {
-            string stamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
-            string body =
-                $"{Environment.NewLine}===== CRASH {stamp} =====" +
-                $"{Environment.NewLine}source={source} terminating={terminating}" +
-                $"{Environment.NewLine}{ex?.ToString() ?? "(no exception object)"}{Environment.NewLine}";
-            // Always to the dedicated crash file (survives even when the runtime
-            // log is disabled), and mirror into runtime.log when it's on.
-            string dir = AppContext.BaseDirectory;
-            try { lock (_runtimeLogLock) { File.AppendAllText(Path.Combine(dir, "crash.log"), body, Encoding.UTF8); } } catch { }
+        CrashDiagnostics.WriteCrash(source, ex, terminating);
 #if !DEBUG
-            if (_releaseRuntimeLogEnabled)
+        if (_releaseRuntimeLogEnabled)
+        {
+            try
             {
-                try { lock (_runtimeLogLock) { File.AppendAllText(Path.Combine(dir, RuntimeLogFileName), body, Encoding.UTF8); } } catch { }
+                string body =
+                    $"{Environment.NewLine}===== CRASH {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} =====" +
+                    $"{Environment.NewLine}source={source} terminating={terminating}" +
+                    $"{Environment.NewLine}{ex?.ToString() ?? "(no exception object)"}{Environment.NewLine}";
+                lock (_runtimeLogLock)
+                {
+                    File.AppendAllText(Path.Combine(AppContext.BaseDirectory, RuntimeLogFileName), body, Encoding.UTF8);
+                }
             }
-#endif
+            catch { }
         }
-        catch { }
+#endif
+    }
+
+    internal static void ReportTimerCallbackException(
+        ref long lastRecordedTick,
+        string logPrefix,
+        string source,
+        Exception exception,
+        Action<string>? log = null)
+    {
+        const long minimumIntervalMs = 10_000;
+        long now = Environment.TickCount64;
+
+        while (true)
+        {
+            long observed = Volatile.Read(ref lastRecordedTick);
+            if (observed >= 0 && now - observed < minimumIntervalMs)
+                return;
+
+            if (Interlocked.CompareExchange(ref lastRecordedTick, now, observed) == observed)
+                break;
+        }
+
+        // Timer callbacks run on ThreadPool threads. Diagnostics must remain
+        // best-effort here: an exception from logging a caught callback fault
+        // must never escape and terminate the process.
+        try { log?.Invoke($"{logPrefix}: {exception}"); } catch { }
+        try { WriteCrashRecord(source, exception, terminating: false); } catch { }
     }
 
     private static void RotateRuntimeLogIfNeeded(string logPath)
@@ -1489,6 +1535,7 @@ partial class Program
 
     private static void CloseUiThreadAfterStartupCancel()
     {
+        _uiShutdownExpected = true;
         try
         {
             CloseStartupStatus();

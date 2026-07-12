@@ -360,17 +360,33 @@ partial class Program
                 _boardIsFlipped = (bool)value;
                 Log($"[Settings] Board flipped: {_boardIsFlipped}");
 
-                if (_stockfish != null) _stockfish.ClearAllDepthTracking();
-                BumpAnalysisSessionVersion();
-                _analysisInProgress = false;
-                _currentMoveArrows = null;
-                _lastAnalysisVariations = null;
-                _lastArrowSourceFEN = "";
-                ClearExternalArrows();
-                ResetAnalysisSchedulingState();
-                if (!IsActiveAnalysisBoardFen(_currentFEN))
+                if (IsActiveAnalysisBoardFen(_currentFEN))
                 {
-                    TryQueueAnalysis(_analysisIsBlackPerspective, force: true);
+                    _analysisBoardIsFlipped = _boardIsFlipped;
+                    _analysisBoardForm?.SetBoardFlipped(_boardIsFlipped);
+                    break;
+                }
+
+                // Remember the explicit choice for this visual position. The
+                // automatically detected orientation remains the source of
+                // truth when the game advances to a different position.
+                string manualBoardPosition = GetBoardPosition(_currentFEN);
+                if (!string.IsNullOrWhiteSpace(manualBoardPosition))
+                {
+                    RememberManualOrientationOverride(manualBoardPosition, _boardIsFlipped);
+                }
+
+                bool manualDisplayOrientationChanged =
+                    PinExternalBoardOrientation(_boardIsFlipped, "toolbar manual override");
+
+                if (manualDisplayOrientationChanged && !string.IsNullOrWhiteSpace(_currentFEN))
+                {
+                    HandleExternalDisplayOrientationChanged("toolbar manual orientation changed");
+                }
+                else
+                {
+                    _evalBar?.SetBoardFlipped(_externalBoardDetectedFlipped);
+                    RefreshDisplayedArrows();
                 }
                 break;
 

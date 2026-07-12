@@ -1180,8 +1180,7 @@ partial class Program
         _pendingOrientationPromptObservedBoards.Clear();
         if (!isAnalysisBoard)
         {
-            _externalBoardDetectedFlipped = flipped;
-            _externalOrientationLockedForCurrentGame = true;
+            PinExternalBoardOrientation(flipped, "orientation prompt choice");
         }
 
         _orientationPromptHost?.Hide();
@@ -1289,9 +1288,11 @@ partial class Program
         string fen,
         bool isAnalysisBoard,
         char referenceColor,
-        out bool? detectedBoardFlipped)
+        out bool? detectedBoardFlipped,
+        out bool authoritativeDecision)
     {
         detectedBoardFlipped = null;
+        authoritativeDecision = false;
 
         string boardPosition = GetBoardPosition(fen);
         if (string.IsNullOrWhiteSpace(boardPosition))
@@ -1308,18 +1309,10 @@ partial class Program
             return true;
         }
 
-        if (!isAnalysisBoard &&
-            TryInferExternalBoardFlippedFromOpposingPawnFiles(boardPosition, out int standardPawnFileConflicts, out int flippedPawnFileConflicts) is bool structuralFlipped)
-        {
-            detectedBoardFlipped = structuralFlipped;
-            TraceBoard(
-                $"orientation pawn-file invariant board={boardPosition} flipped={structuralFlipped} " +
-                $"standardPawnFiles={standardPawnFileConflicts} flippedPawnFiles={flippedPawnFileConflicts} source=external");
-            return true;
-        }
         if (TryGetManualOrientationOverride(boardPosition, out bool manualFlipped))
         {
             detectedBoardFlipped = manualFlipped;
+            authoritativeDecision = true;
             return true;
         }
 
@@ -1336,19 +1329,37 @@ partial class Program
             CoordSamplePlacementMatches(coordReading.Value.Fen, boardPosition))
         {
             detectedBoardFlipped = coordReading.Value.Flipped;
-            // Coord landmarks are ground truth, so PIN the orientation for this
-            // board context. Real-board coord recall is imperfect (the model
-            // misses the '1'/'8' on many frames), so without pinning a later
-            // coord-less frame would fall through to the pawn heuristic and, on
-            // an ambiguous position, re-raise the orientation prompt even though
-            // the coords already answered it. A genuine board switch resets the
-            // pin; a fresh coord read that disagrees (the board was flipped)
-            // re-pins on its own frame. Also seed the short-term memory so the
-            // recent-decision path agrees for the current side-to-move.
-            PinExternalBoardOrientation(coordReading.Value.Flipped, "coord-landmark");
-            RememberRecentOrientationDecision(coordReading.Value.Flipped, isAnalysisBoard, referenceColor);
+            // The caller applies and pins this ground-truth decision only after
+            // geometry stability has been checked. Mutating display state here
+            // used to let a transitional frame lock the wrong orientation.
+            authoritativeDecision = true;
             TraceBoard(
                 $"orientation coord-landmark board={boardPosition} flipped={coordReading.Value.Flipped} source=external");
+            return true;
+        }
+
+        // A committed game orientation must also govern normalization. Letting
+        // a non-authoritative structural guess rotate the canonical FEN while
+        // the display setter rejected the same guess split position and screen
+        // orientation into contradictory states. Manual and coordinate-ground-
+        // truth decisions above may still correct the lock.
+        if (!isAnalysisBoard && _externalOrientationLockedForCurrentGame)
+        {
+            detectedBoardFlipped = _externalBoardDetectedFlipped;
+            TraceBoard($"orientation locked board={boardPosition} flipped={detectedBoardFlipped.Value} source=external");
+            return true;
+        }
+
+        // Structural pawn ordering is strong when available, but it remains a
+        // heuristic and therefore belongs below explicit choices and the
+        // coordinate-landmark oracle.
+        if (!isAnalysisBoard &&
+            TryInferExternalBoardFlippedFromOpposingPawnFiles(boardPosition, out int standardPawnFileConflicts, out int flippedPawnFileConflicts) is bool structuralFlipped)
+        {
+            detectedBoardFlipped = structuralFlipped;
+            TraceBoard(
+                $"orientation pawn-file invariant board={boardPosition} flipped={structuralFlipped} " +
+                $"standardPawnFiles={standardPawnFileConflicts} flippedPawnFiles={flippedPawnFileConflicts} source=external");
             return true;
         }
 
@@ -1358,13 +1369,6 @@ partial class Program
             TraceBoard(
                 $"orientation recent-carry board={boardPosition} flipped={recentFlippedEarly} color={(referenceColor == 'b' ? "black" : "white")} " +
                 $"source=external");
-            return true;
-        }
-
-        if (!isAnalysisBoard && _externalOrientationLockedForCurrentGame)
-        {
-            detectedBoardFlipped = _externalBoardDetectedFlipped;
-            TraceBoard($"orientation locked board={boardPosition} flipped={detectedBoardFlipped.Value} source=external");
             return true;
         }
 
@@ -1427,28 +1431,6 @@ partial class Program
         if (inferredFlip.HasValue)
         {
             detectedBoardFlipped = inferredFlip.Value;
-            // Lock this decision after N consecutive confident agreements,
-            // which prevents per-frame oscillation while still allowing the
-            // first answer to be overridden if it was a false positive from a
-            // partial detection. The lock is cleared by perspective toggle,
-            // F1 overlay-disable, or fresh-game-start.
-            if (!isAnalysisBoard)
-            {
-                if (_orientationConfirmStreakFlipped == inferredFlip.Value)
-                {
-                    _orientationConfirmStreakCount++;
-                }
-                else
-                {
-                    _orientationConfirmStreakFlipped = inferredFlip.Value;
-                    _orientationConfirmStreakCount = 1;
-                }
-
-                if (_orientationConfirmStreakCount >= OrientationLockStreakThreshold)
-                {
-                    _externalOrientationLockedForCurrentGame = true;
-                }
-            }
             return true;
         }
 
@@ -1480,14 +1462,29 @@ partial class Program
         return true;
     }
 
-    private static string NormalizeExternalDetectedFen(string fen, out bool? detectedBoardFlipped)
+    private static string NormalizeExternalDetectedFen(
+        string fen,
+        out bool? detectedBoardFlipped,
+        out bool authoritativeOrientation)
     {
-        bool rawInitialPinned = TryPinExternalOrientationFromRawInitialFen(fen, out bool rawInitialFlipped);
-        if (!TryResolveOrientationDecision(fen, isAnalysisBoard: false, GetOrientationPromptReferenceColor(fen), out detectedBoardFlipped))
+        bool rawInitialResolved = TryResolveExternalOrientationFromRawInitialFen(fen, out bool rawInitialFlipped);
+        if (!TryResolveOrientationDecision(
+                fen,
+                isAnalysisBoard: false,
+                GetOrientationPromptReferenceColor(fen),
+                out detectedBoardFlipped,
+                out authoritativeOrientation))
+        {
             return fen;
+        }
 
-        if (rawInitialPinned)
+        string rawBoardPosition = GetBoardPosition(fen);
+        bool hasManualOverride = TryGetManualOrientationOverride(rawBoardPosition, out _);
+        if (rawInitialResolved && !hasManualOverride)
+        {
             detectedBoardFlipped = rawInitialFlipped;
+            authoritativeOrientation = true;
+        }
 
         string normalizedFen = detectedBoardFlipped == true
             ? Rotate180(fen)
@@ -1496,21 +1493,19 @@ partial class Program
         return normalizedFen;
     }
 
-    private static bool TryPinExternalOrientationFromRawInitialFen(string rawFen, out bool flipped)
+    private static bool TryResolveExternalOrientationFromRawInitialFen(string rawFen, out bool flipped)
     {
         flipped = _externalBoardDetectedFlipped;
 
         string rawBoard = GetBoardPosition(rawFen);
         if (rawBoard == InitialBoardPosition)
         {
-            PinExternalBoardOrientation(false, "raw detected = standard initial position");
             flipped = false;
             return true;
         }
 
         if (rawBoard == InitialBoardPositionRotated)
         {
-            PinExternalBoardOrientation(true, "raw detected = rotated initial position");
             flipped = true;
             return true;
         }
@@ -1518,19 +1513,22 @@ partial class Program
         return false;
     }
 
-    private static void PinExternalBoardOrientation(bool flipped, string reason)
+    private static bool PinExternalBoardOrientation(bool flipped, string reason)
     {
         bool changed = !_externalOrientationLockedForCurrentGame || _externalBoardDetectedFlipped != flipped;
         _externalBoardDetectedFlipped = flipped;
         _externalOrientationLockedForCurrentGame = true;
         _orientationConfirmStreakFlipped = flipped;
         _orientationConfirmStreakCount = OrientationLockStreakThreshold;
+        SyncExternalDisplayOrientationState();
 
         if (changed)
         {
             TraceBoard($"orientation pinned: {reason}; flipped={flipped}");
             LogDiag("ORIENTATION", $"pinned {reason}; flipped={flipped}");
         }
+
+        return changed;
     }
 
     private static bool? TryInferExternalBoardFlipped(string fen, OrientationAssessment? assessment = null)

@@ -25,6 +25,9 @@ namespace ChessKit
         private static bool _gpuCaptureAvailable = false;
         private static readonly object _gpuLock = new object();
         private static DateTime _lastInitAttempt = DateTime.MinValue;
+        private static Rectangle _duplicatedOutputBounds = Rectangle.Empty;
+        private static readonly bool _forceGdiCapture =
+            Environment.GetEnvironmentVariable("CHESSKIT_FORCE_GDI") is "1" or "true" or "TRUE";
 
         // === Region-DXGI fast path state ===
         // We hold a single staging texture sized to the requested region.
@@ -50,7 +53,14 @@ namespace ChessKit
 
         static ScreenCapture()
         {
-            InitializeGpuCapture();
+            if (!_forceGdiCapture)
+            {
+                InitializeGpuCapture();
+            }
+            else
+            {
+                _lastRegionCaptureBackend = "GDI-forced";
+            }
         }
 
         private static void InitializeGpuCapture()
@@ -71,6 +81,14 @@ namespace ChessKit
                 // Get first output (primary monitor)
                 using var output = adapter.GetOutput(0);
                 using var output1 = output.QueryInterface<Output1>();
+                var desktopBounds = output.Description.DesktopBounds;
+                _duplicatedOutputBounds = Rectangle.FromLTRB(
+                    desktopBounds.Left,
+                    desktopBounds.Top,
+                    desktopBounds.Right,
+                    desktopBounds.Bottom);
+                if (_duplicatedOutputBounds.Width <= 0 || _duplicatedOutputBounds.Height <= 0)
+                    throw new InvalidOperationException("DXGI output reported empty desktop bounds");
 
                 // Create desktop duplication
                 _duplicatedOutput = output1.DuplicateOutput(_device);
@@ -91,7 +109,7 @@ namespace ChessKit
         /// </summary>
         public static Bitmap CapturePrimaryScreen()
         {
-            if (_gpuCaptureAvailable)
+            if (_gpuCaptureAvailable && Screen.PrimaryScreen?.Bounds == _duplicatedOutputBounds)
             {
                 lock (_gpuLock)
                 {
@@ -158,7 +176,7 @@ namespace ChessKit
         /// </summary>
         public static Bitmap CaptureRegion(Rectangle region)
         {
-            if (_gpuCaptureAvailable && !_regionDxgiBroken && region.Width > 0 && region.Height > 0 && IsRegionInsidePrimaryScreen(region))
+            if (_gpuCaptureAvailable && !_regionDxgiBroken && region.Width > 0 && region.Height > 0 && IsRegionInsideDuplicatedOutput(region))
             {
                 lock (_gpuLock)
                 {
@@ -212,7 +230,7 @@ namespace ChessKit
         /// </summary>
         public static Mat CaptureRegionMat(Rectangle region)
         {
-            if (_gpuCaptureAvailable && !_regionDxgiBroken && region.Width > 0 && region.Height > 0 && IsRegionInsidePrimaryScreen(region))
+            if (_gpuCaptureAvailable && !_regionDxgiBroken && region.Width > 0 && region.Height > 0 && IsRegionInsideDuplicatedOutput(region))
             {
                 lock (_gpuLock)
                 {
@@ -316,13 +334,17 @@ namespace ChessKit
             if (_duplicatedOutput == null || _device == null)
                 throw new InvalidOperationException("GPU capture not initialized");
 
-            // Clamp region to actual screen bounds. AcquireNextFrame returns
+            // Clamp region to the duplicated output. AcquireNextFrame returns
             // a texture matching the desktop output size; reading outside that
             // box would be undefined.
-            var screenBounds = Screen.PrimaryScreen!.Bounds;
-            region = Rectangle.Intersect(region, screenBounds);
+            region = Rectangle.Intersect(region, _duplicatedOutputBounds);
             if (region.Width <= 0 || region.Height <= 0)
                 return new Bitmap(1, 1);
+            var localRegion = new Rectangle(
+                region.X - _duplicatedOutputBounds.X,
+                region.Y - _duplicatedOutputBounds.Y,
+                region.Width,
+                region.Height);
 
             SharpDX.DXGI.Resource? screenResource = null;
             OutputDuplicateFrameInformation frameInfo;
@@ -348,6 +370,7 @@ namespace ChessKit
 
                 using var screenTexture2D = screenResource.QueryInterface<Texture2D>();
                 var srcDesc = screenTexture2D.Description;
+                ValidateLocalDxgiRegion(localRegion, srcDesc.Width, srcDesc.Height);
 
                 // Make sure our persistent staging texture matches the region
                 // size. If size changed, dispose the old one and create a new
@@ -360,11 +383,11 @@ namespace ChessKit
                 // ResourceRegion is exclusive on the right/bottom edges.
                 var srcBox = new ResourceRegion
                 {
-                    Left = region.X,
-                    Top = region.Y,
+                    Left = localRegion.X,
+                    Top = localRegion.Y,
                     Front = 0,
-                    Right = region.X + region.Width,
-                    Bottom = region.Y + region.Height,
+                    Right = localRegion.Right,
+                    Bottom = localRegion.Bottom,
                     Back = 1
                 };
                 _device.ImmediateContext.CopySubresourceRegion(
@@ -424,10 +447,14 @@ namespace ChessKit
             if (_duplicatedOutput == null || _device == null)
                 throw new InvalidOperationException("GPU capture not initialized");
 
-            var screenBounds = Screen.PrimaryScreen!.Bounds;
-            region = Rectangle.Intersect(region, screenBounds);
+            region = Rectangle.Intersect(region, _duplicatedOutputBounds);
             if (region.Width <= 0 || region.Height <= 0)
                 return new Mat(1, 1, MatType.CV_8UC3, Scalar.Black);
+            var localRegion = new Rectangle(
+                region.X - _duplicatedOutputBounds.X,
+                region.Y - _duplicatedOutputBounds.Y,
+                region.Width,
+                region.Height);
 
             SharpDX.DXGI.Resource? screenResource = null;
             OutputDuplicateFrameInformation frameInfo;
@@ -444,11 +471,12 @@ namespace ChessKit
                     throw new InvalidOperationException($"Failed to acquire frame: {acquireResult.Code}");
                 frameAcquired = true;
 
-                if (CanReuseCachedRegionFromFrameMetadata(region, frameInfo))
+                if (CanReuseCachedRegionFromFrameMetadata(region, localRegion, frameInfo))
                     throw new DxgiFrameTimeoutException();
 
                 using var screenTexture2D = screenResource.QueryInterface<Texture2D>();
                 var srcDesc = screenTexture2D.Description;
+                ValidateLocalDxgiRegion(localRegion, srcDesc.Width, srcDesc.Height);
 
                 EnsureRegionStagingTexture(region.Width, region.Height, srcDesc.Format);
                 if (_regionStagingTexture == null)
@@ -456,11 +484,11 @@ namespace ChessKit
 
                 var srcBox = new ResourceRegion
                 {
-                    Left = region.X,
-                    Top = region.Y,
+                    Left = localRegion.X,
+                    Top = localRegion.Y,
                     Front = 0,
-                    Right = region.X + region.Width,
-                    Bottom = region.Y + region.Height,
+                    Right = localRegion.Right,
+                    Bottom = localRegion.Bottom,
                     Back = 1
                 };
                 _device.ImmediateContext.CopySubresourceRegion(
@@ -470,7 +498,7 @@ namespace ChessKit
                 var mapSource = _device.ImmediateContext.MapSubresource(_regionStagingTexture, 0, MapMode.Read, MapFlags.None);
                 try
                 {
-                    var bgra = new Mat(region.Height, region.Width, MatType.CV_8UC4);
+                    using var bgra = new Mat(region.Height, region.Width, MatType.CV_8UC4);
                     unsafe
                     {
                         byte* srcPtr = (byte*)mapSource.DataPointer;
@@ -489,7 +517,6 @@ namespace ChessKit
 
                     var bgr = new Mat();
                     Cv2.CvtColor(bgra, bgr, ColorConversionCodes.BGRA2BGR);
-                    bgra.Dispose();
 
                     _regionDxgiFailures = 0;
                     return bgr;
@@ -539,11 +566,14 @@ namespace ChessKit
             return false;
         }
 
-        private static bool CanReuseCachedRegionFromFrameMetadata(Rectangle region, OutputDuplicateFrameInformation frameInfo)
+        private static bool CanReuseCachedRegionFromFrameMetadata(
+            Rectangle screenRegion,
+            Rectangle localRegion,
+            OutputDuplicateFrameInformation frameInfo)
         {
             if (_lastRegionMat == null
                 || _lastRegionMat.Empty()
-                || _lastRegionMatRect != region
+                || _lastRegionMatRect != screenRegion
                 || frameInfo.TotalMetadataBufferSize <= 0)
             {
                 return false;
@@ -551,10 +581,10 @@ namespace ChessKit
 
             try
             {
-                if (AnyDirtyRectIntersects(region))
+                if (AnyDirtyRectIntersects(localRegion))
                     return false;
 
-                if (AnyMoveRectIntersects(region))
+                if (AnyMoveRectIntersects(localRegion))
                     return false;
 
                 return true;
@@ -681,6 +711,7 @@ namespace ChessKit
 
             SharpDX.DXGI.Resource? screenResource = null;
             OutputDuplicateFrameInformation duplicateFrameInformation;
+            bool frameAcquired = false;
 
             try
             {
@@ -691,6 +722,7 @@ namespace ChessKit
                 {
                     throw new InvalidOperationException("Failed to acquire frame");
                 }
+                frameAcquired = true;
 
                 // Query for texture
                 using var screenTexture2D = screenResource.QueryInterface<Texture2D>();
@@ -741,12 +773,12 @@ namespace ChessKit
             {
                 screenResource?.Dispose();
 
-                // Release frame
-                try
+                // Release only a frame that was actually acquired. Calling
+                // ReleaseFrame after a timeout/failure can poison duplication.
+                if (frameAcquired)
                 {
-                    _duplicatedOutput?.ReleaseFrame();
+                    try { _duplicatedOutput?.ReleaseFrame(); } catch { }
                 }
-                catch { }
             }
         }
 
@@ -815,14 +847,25 @@ namespace ChessKit
                 : bounds;
         }
 
-        private static bool IsRegionInsidePrimaryScreen(Rectangle region)
+        private static bool IsRegionInsideDuplicatedOutput(Rectangle region)
         {
-            Rectangle primary = Screen.PrimaryScreen?.Bounds ?? Rectangle.Empty;
-            return !primary.IsEmpty &&
-                region.Left >= primary.Left &&
-                region.Top >= primary.Top &&
-                region.Right <= primary.Right &&
-                region.Bottom <= primary.Bottom;
+            return !_duplicatedOutputBounds.IsEmpty &&
+                region.Left >= _duplicatedOutputBounds.Left &&
+                region.Top >= _duplicatedOutputBounds.Top &&
+                region.Right <= _duplicatedOutputBounds.Right &&
+                region.Bottom <= _duplicatedOutputBounds.Bottom;
+        }
+
+        private static void ValidateLocalDxgiRegion(Rectangle region, int textureWidth, int textureHeight)
+        {
+            if (region.Left < 0 || region.Top < 0 ||
+                region.Right > textureWidth || region.Bottom > textureHeight ||
+                region.Width <= 0 || region.Height <= 0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(region),
+                    $"DXGI region {region} is outside output texture {textureWidth}x{textureHeight}");
+            }
         }
 
         /// <summary>
@@ -857,7 +900,7 @@ namespace ChessKit
         public static string GetCaptureMode()
         {
             if (!_gpuCaptureAvailable)
-                return "GDI (no GPU)";
+                return _forceGdiCapture ? "GDI (forced)" : "GDI (no GPU)";
             if (_regionDxgiBroken)
                 return $"GDI (GPU broken after {_regionDxgiFailures} fails)";
             return string.IsNullOrWhiteSpace(_lastRegionCaptureBackend)
@@ -867,6 +910,8 @@ namespace ChessKit
 
         private static void CleanupGpu()
         {
+            // Release resources that belong to the device before the device.
+            DisposeRegionStaging();
             try
             {
                 _screenTexture?.Dispose();
@@ -880,9 +925,8 @@ namespace ChessKit
                 _duplicatedOutput = null;
                 _device = null;
                 _gpuCaptureAvailable = false;
+                _duplicatedOutputBounds = Rectangle.Empty;
             }
-
-            DisposeRegionStaging();
         }
 
         /// <summary>

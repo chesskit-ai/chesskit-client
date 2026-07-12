@@ -71,6 +71,92 @@ partial class Program
         return NormalizeExternalBoardRect(new Rect(avgX, avgY, avgW, avgH));
     }
 
+    private static void UpdateOverlayPositionIfChanged(Rectangle boardRect)
+    {
+        if (_overlay == null)
+        {
+            _lastOverlayPositionRect = Rectangle.Empty;
+            return;
+        }
+
+        if (boardRect == _lastOverlayPositionRect)
+            return;
+
+        _lastOverlayPositionRect = boardRect;
+        _overlay.SetBoardScreenPosition(boardRect);
+    }
+
+    private static void UpdateTrackedSurfaceGeometry(Rect trackedBox)
+    {
+        var boardRect = new Rectangle(
+            trackedBox.X,
+            trackedBox.Y,
+            trackedBox.Width,
+            trackedBox.Height);
+
+        if (_evalBarEnabled && _evalBar != null)
+        {
+            if (boardRect != _lastEvalBarPositionRect)
+            {
+                _lastEvalBarPositionRect = boardRect;
+                _evalBar.UpdatePosition(boardRect);
+            }
+        }
+        else
+        {
+            _lastEvalBarPositionRect = Rectangle.Empty;
+        }
+
+        if (_engineLinesEnabled && _engineLines != null)
+        {
+            if (boardRect != _lastEngineLinesPositionRect)
+            {
+                _lastEngineLinesPositionRect = boardRect;
+                _engineLines.UpdatePosition(boardRect);
+            }
+        }
+        else
+        {
+            _lastEngineLinesPositionRect = Rectangle.Empty;
+        }
+
+        UpdateOverlayPositionIfChanged(boardRect);
+
+        if (_settingsToolbar == null)
+        {
+            _hasLastToolbarPosition = false;
+            return;
+        }
+
+        if (_trackedHwnd != IntPtr.Zero &&
+            WindowTracker.TryGetWindowRect(_trackedHwnd, out var windowRect))
+        {
+            var toolbarRect = new Rectangle(
+                windowRect.Left,
+                windowRect.Top,
+                windowRect.Width,
+                windowRect.Height);
+            if (!_hasLastToolbarPosition ||
+                !_lastToolbarPositionUsedWindow ||
+                toolbarRect != _lastToolbarPositionRect)
+            {
+                _lastToolbarPositionRect = toolbarRect;
+                _lastToolbarPositionUsedWindow = true;
+                _hasLastToolbarPosition = true;
+                _settingsToolbar.UpdateWindowPosition(toolbarRect);
+            }
+        }
+        else if (!_hasLastToolbarPosition ||
+                 _lastToolbarPositionUsedWindow ||
+                 boardRect != _lastToolbarPositionRect)
+        {
+            _lastToolbarPositionRect = boardRect;
+            _lastToolbarPositionUsedWindow = false;
+            _hasLastToolbarPosition = true;
+            _settingsToolbar.UpdatePosition(boardRect);
+        }
+    }
+
     private static void RequestApplicationExit()
     {
         DialogResult result = ShowTopMostMessageBox(
@@ -84,6 +170,7 @@ partial class Program
 
         if (_stockfish != null) _stockfish.ClearAllDepthTracking();
         Log($"[{DateTime.Now:HH:mm:ss}] Exit confirmed");
+        CrashDiagnostics.MarkCleanExit("user confirmed exit");
         Environment.Exit(0);
     }
 
@@ -1188,14 +1275,20 @@ partial class Program
                 return;
             }
 
-            string candidateFen = NormalizeExternalDetectedFen(rawFen, out bool? detectedBoardFlipped);
+            string candidateFen = NormalizeExternalDetectedFen(
+                rawFen,
+                out bool? detectedBoardFlipped,
+                out bool authoritativeOrientation);
             if (!UCIEngine.IsFenStructurallySane(candidateFen, out string sanityReason))
             {
                 LogDiag("WINTRACK", $"prime skipped invalid FEN ({sanityReason}) raw={rawFen}");
                 return;
             }
 
-            ApplyExternalDisplayOrientation(detectedBoardFlipped, $"tracked board prime ({reason})");
+            bool externalDisplayOrientationChanged = ApplyExternalDisplayOrientation(
+                detectedBoardFlipped,
+                $"tracked board prime ({reason})",
+                authoritativeObservation: authoritativeOrientation);
 
             string confirmedFen = MergeDetectedFenWithHistory(_currentFEN, candidateFen);
             if (string.Equals(confirmedFen, _currentFEN, StringComparison.Ordinal))
@@ -1208,6 +1301,11 @@ partial class Program
                 bool staticHighlightChangedSide =
                     initialBoardSnapshot != null &&
                     TryApplyStaticLastMoveHighlightTurnHintAndQueue(_currentFEN, initialBoardSnapshot);
+
+                if (externalDisplayOrientationChanged)
+                {
+                    HandleExternalDisplayOrientationChanged("tracked board orientation changed");
+                }
 
                 if (!staticHighlightChangedSide &&
                     _continuousAnalysisEnabled &&

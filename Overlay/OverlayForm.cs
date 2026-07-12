@@ -810,7 +810,7 @@ namespace ChessKit
                 // Draw in reverse order so best move is on top
                 foreach (var arrow in arrows.OrderByDescending(a => a.Strength))
                 {
-                    DrawLichessStyleArrow(e.Graphics, arrow, board, squareSize);
+                    DrawLichessStyleArrow(e.Graphics, arrow, arrows.Count, board, squareSize);
                     DrawPromotionHint(e.Graphics, arrow, board, squareSize);
                     TryDrawDepthBadge(e.Graphics, arrow, board, squareSize);
                 }
@@ -1057,7 +1057,12 @@ namespace ChessKit
             return new RectangleF(board.Left + margin, board.Top + margin, panelWidth, panelHeight);
         }
 
-        private void DrawLichessStyleArrow(Graphics g, MoveArrow arrow, Rectangle board, float squareSize)
+        private void DrawLichessStyleArrow(
+            Graphics g,
+            MoveArrow arrow,
+            int totalArrowCount,
+            Rectangle board,
+            float squareSize)
         {
             float fromX, fromY, toX, toY;
 
@@ -1104,44 +1109,34 @@ namespace ChessKit
             float primaryHeadDamping = 0.74f + (smallBoardScale * 0.26f);
             float primaryThicknessDamping = 0.84f + (smallBoardScale * 0.16f);
 
-            // Different colors and sizes based on strength, scaled from square size.
-            Color arrowColor;
-            float thickness;
-            float headWidth;
-            float headLength;
+            // Rank 1 uses the strongest style and the final displayed rank uses
+            // the weakest. Every rank between them is evenly interpolated. The old
+            // hard-coded 1/2/3/default buckets made ranks 2 and 3 cluster together
+            // visually, especially once shaft and arrow-head sizes compounded.
+            float prominence = ArrowRankScale.GetProminence(arrow.Strength, totalArrowCount);
+            float strongestThickness = Math.Clamp(
+                squareSize * 0.218f * primaryThicknessDamping,
+                3.8f,
+                15.6f);
+            float weakestThickness = Math.Clamp(squareSize * 0.086f, 1.8f, 5.8f);
 
-            switch (arrow.Strength)
-            {
-                case 1:  // Best move
-                    // Clamp MINIMUMS lowered (here and in the cases below) so small
-                    // boards scale down proportionally. The per-strength floors were
-                    // tuned for large boards and oversized the thickness - and the
-                    // head, which is a multiple of it - on small ones. Large boards
-                    // are unaffected: they sit at or near the clamp maximums.
-                    thickness = Math.Clamp(squareSize * 0.218f * primaryThicknessDamping, 3.8f, 15.6f);
-                    arrowColor = Color.FromArgb(255, 38, 84, 132);
-                    headWidth = 4.75f * widthScale * primaryHeadDamping;
-                    headLength = 4.25f * lengthScale * primaryHeadDamping;
-                    break;
-                case 2:  // Second best
-                    thickness = Math.Clamp(squareSize * 0.14f, 2.7f, 8.8f);
-                    arrowColor = Color.FromArgb(255, 38, 84, 132);
-                    headWidth = 3.35f * widthScale;
-                    headLength = 2.95f * lengthScale;
-                    break;
-                case 3:  // Third best
-                    thickness = Math.Clamp(squareSize * 0.104f, 2.1f, 6.6f);
-                    arrowColor = Color.FromArgb(255, 38, 84, 132);
-                    headWidth = 2.85f * widthScale;
-                    headLength = 2.5f * lengthScale;
-                    break;
-                default:
-                    thickness = Math.Clamp(squareSize * 0.086f, 1.8f, 5.8f);
-                    arrowColor = Color.FromArgb(255, 38, 84, 132);
-                    headWidth = 2.5f * widthScale;
-                    headLength = 2.25f * lengthScale;
-                    break;
-            }
+            float thickness = ArrowRankScale.Lerp(weakestThickness, strongestThickness, prominence);
+            // AdjustableArrowCap dimensions are scaled by Pen.Width. Interpolate
+            // the final on-screen head dimensions, then convert back to cap units;
+            // interpolating both independently would reintroduce a compounded curve.
+            float weakestHeadWidthPixels = weakestThickness * 2.5f * widthScale;
+            float strongestHeadWidthPixels = strongestThickness * 4.75f * widthScale * primaryHeadDamping;
+            float weakestHeadLengthPixels = weakestThickness * 2.25f * lengthScale;
+            float strongestHeadLengthPixels = strongestThickness * 4.25f * lengthScale * primaryHeadDamping;
+            float headWidth = ArrowRankScale.Lerp(
+                weakestHeadWidthPixels,
+                strongestHeadWidthPixels,
+                prominence) / thickness;
+            float headLength = ArrowRankScale.Lerp(
+                weakestHeadLengthPixels,
+                strongestHeadLengthPixels,
+                prominence) / thickness;
+            Color arrowColor = Color.FromArgb(255, 38, 84, 132);
 
             using (var pen = new Pen(arrowColor, thickness))
             {
@@ -1318,11 +1313,28 @@ namespace ChessKit
         public int FromRank { get; set; } // 0-7 (1-8)
         public int ToFile { get; set; }
         public int ToRank { get; set; }
-        public int Strength { get; set; } // 1=best, 2=second, 3=third
+        public int Strength { get; set; } // 1=best; larger values are lower-ranked moves
         public bool IsFlipped { get; set; } // For black perspective
         public char PromotionPiece { get; set; }
         public char MovingSide { get; set; }
         public int Depth { get; set; }
+    }
+
+    internal static class ArrowRankScale
+    {
+        internal static float GetProminence(int strength, int totalArrowCount)
+        {
+            if (totalArrowCount <= 1)
+                return 1f;
+
+            int rankIndex = Math.Clamp(strength - 1, 0, totalArrowCount - 1);
+            return 1f - (rankIndex / (float)(totalArrowCount - 1));
+        }
+
+        internal static float Lerp(float weakest, float strongest, float prominence)
+        {
+            return weakest + ((strongest - weakest) * Math.Clamp(prominence, 0f, 1f));
+        }
     }
 
     public sealed class CoachSquareMark

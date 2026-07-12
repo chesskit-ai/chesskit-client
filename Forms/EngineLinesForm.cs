@@ -340,7 +340,7 @@ namespace ChessKit
                     {
                         // Fixed width for eval to align moves
                         var evalRect = new RectangleF(Dpi.Scale(this, 92), y, Dpi.Scale(this, 68), lineHeight);
-                        var format = new StringFormat() { Alignment = StringAlignment.Near };
+                        using var format = new StringFormat() { Alignment = StringAlignment.Near };
                         g.DrawString(evalText, _evalFont, evalBrush, evalRect, format);
                     }
 

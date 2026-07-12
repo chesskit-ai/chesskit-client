@@ -39,6 +39,11 @@ partial class Program
                 return;
             }
 
+            // Always-on, low-volume lifecycle evidence. Unlike runtime.log this
+            // has no hot-path writes and also falls back to LocalAppData when the
+            // copied EXE directory is not writable.
+            CrashDiagnostics.Initialize();
+
 #if DEBUG
             DebugRuntime.Initialize();
 #else
@@ -108,93 +113,144 @@ partial class Program
             LogCurrentEngine("Current engine");
 
             // Initialize overlay forms
-            using var ready = new AutoResetEvent(false);
+            using var uiPumpReady = new ManualResetEvent(false);
             var uiThread = new Thread(() =>
             {
-                Application.EnableVisualStyles();
-                _overlay = new OverlayForm();
-                _evalBar = new EvalBarForm();
-                _evalBar.SetDisplayMode(_evalDisplayMode);
-                _engineLines = new EngineLinesForm();
-                _settingsToolbar = new SettingsToolbarForm();
-                _hotkeyController!.CreateRegisteredListener();
-                _analysisBoardForm = new AnalysisBoardForm();
-                _gameAnalysisForm = new GameAnalysisForm();
-                _orientationPromptHost = new OrientationPromptHost();
-                _analysisBoardController = CreateAnalysisBoardController();
-                _analysisBoardForm.SnapshotChanged += UpdateAnalysisBoardSnapshot;
-                _analysisBoardForm.AnalysisModeChanged += _analysisBoardController.HandleAnalysisBoardAnalysisModeChanged;
-                _analysisBoardForm.MirrorModeChanged += _analysisBoardController.HandleAnalysisBoardMirrorModeChanged;
-                _analysisBoardForm.AnalysisSettingsChanged += _analysisBoardController.HandleAnalysisBoardAnalysisSettingsChanged;
-                _analysisBoardForm.MatchSettingsChanged += _analysisBoardController.HandleAnalysisBoardMatchSettingsChanged;
-                _analysisBoardForm.MatchCommandRequested += _analysisBoardController.HandleAnalysisBoardMatchCommandRequested;
-                _analysisBoardForm.GameAnalysisRequested += _analysisBoardController.HandleGameAnalysisRequested;
-                _gameAnalysisForm.AnalyzeRequested += _analysisBoardController.AnalyzeGameAsync;
-                _gameAnalysisForm.AnalysisCompleted += _analysisBoardController.HandleGameAnalysisCompleted;
-                _gameAnalysisForm.MoveSelected += _analysisBoardController.HandleGameAnalysisMoveSelected;
-                _analysisBoardController.HandleAnalysisBoardAnalysisSettingsChanged(_analysisBoardForm.GetAnalysisSettings());
-                _analysisBoardController.HandleAnalysisBoardMatchSettingsChanged(_analysisBoardForm.GetMatchSettings());
-                _orientationPromptHost.DirectionChosen += OnOrientationPromptDirectionChosen;
-                _orientationPromptHost.Dismissed += OnOrientationPromptDismissed;
-
-                // Subscribe to settings changes from toolbar
-                _settingsToolbar.SettingChanged += HandleSettingChanged;
-                BoardVisionDetector.ConnectionStateChanged += state =>
+                try
                 {
-                    try { _settingsToolbar?.SyncVisionConnectionState(state); } catch { }
-                };
+                    Application.EnableVisualStyles();
+                    _overlay = new OverlayForm();
+                    _evalBar = new EvalBarForm();
+                    _evalBar.SetDisplayMode(_evalDisplayMode);
+                    _engineLines = new EngineLinesForm();
+                    _settingsToolbar = new SettingsToolbarForm();
+                    _hotkeyController!.CreateRegisteredListener();
+                    _analysisBoardForm = new AnalysisBoardForm();
+                    _gameAnalysisForm = new GameAnalysisForm();
+                    _orientationPromptHost = new OrientationPromptHost();
+                    _analysisBoardController = CreateAnalysisBoardController();
+                    _analysisBoardForm.SnapshotChanged += UpdateAnalysisBoardSnapshot;
+                    _analysisBoardForm.AnalysisModeChanged += _analysisBoardController.HandleAnalysisBoardAnalysisModeChanged;
+                    _analysisBoardForm.MirrorModeChanged += _analysisBoardController.HandleAnalysisBoardMirrorModeChanged;
+                    _analysisBoardForm.AnalysisSettingsChanged += _analysisBoardController.HandleAnalysisBoardAnalysisSettingsChanged;
+                    _analysisBoardForm.MatchSettingsChanged += _analysisBoardController.HandleAnalysisBoardMatchSettingsChanged;
+                    _analysisBoardForm.MatchCommandRequested += _analysisBoardController.HandleAnalysisBoardMatchCommandRequested;
+                    _analysisBoardForm.GameAnalysisRequested += _analysisBoardController.HandleGameAnalysisRequested;
+                    _gameAnalysisForm.AnalyzeRequested += _analysisBoardController.AnalyzeGameAsync;
+                    _gameAnalysisForm.AnalysisCompleted += _analysisBoardController.HandleGameAnalysisCompleted;
+                    _gameAnalysisForm.MoveSelected += _analysisBoardController.HandleGameAnalysisMoveSelected;
+                    _analysisBoardController.HandleAnalysisBoardAnalysisSettingsChanged(_analysisBoardForm.GetAnalysisSettings());
+                    _analysisBoardController.HandleAnalysisBoardMatchSettingsChanged(_analysisBoardForm.GetMatchSettings());
+                    _orientationPromptHost.DirectionChosen += OnOrientationPromptDirectionChosen;
+                    _orientationPromptHost.Dismissed += OnOrientationPromptDismissed;
 
-                // Sync initial states
-                _settingsToolbar.SyncEvalBarState(_evalBarEnabled);
-                _settingsToolbar.SyncEngineLinesState(_engineLinesEnabled);
-                _settingsToolbar.SyncBoardFlippedState(_boardIsFlipped);
-                _settingsToolbar.SyncCoachModeState(_settingsToolbar.GetCoachModeEnabled());
-                _settingsToolbar.SyncSettingsToolbarHiddenState(_settingsToolbarHidden);
-                // Apply the persisted capture-exclusion preference to the just-
-                // created overlay surfaces (they register with CaptureExclusion
-                // defaulting ON; this honors a saved OFF). See CaptureExclusion.
-                CaptureExclusion.SetEnabled(_settingsToolbar.GetExcludeOverlaysFromCaptureEnabled());
-                _hotkeyController!.Bindings = _settingsToolbar.GetHotkeyBindings();
-                _hotkeyController.WireRegisteredListener();
-                bool showSystemTrayIcon = _settingsToolbar.GetShowTaskbarIcon();
+                    // Subscribe to settings changes from toolbar
+                    _settingsToolbar.SettingChanged += HandleSettingChanged;
+                    BoardVisionDetector.ConnectionStateChanged += state =>
+                    {
+                        try { _settingsToolbar?.SyncVisionConnectionState(state); } catch { }
+                    };
+
+                    // Sync initial states
+                    _settingsToolbar.SyncEvalBarState(_evalBarEnabled);
+                    _settingsToolbar.SyncEngineLinesState(_engineLinesEnabled);
+                    _settingsToolbar.SyncBoardFlippedState(_boardIsFlipped);
+                    _settingsToolbar.SyncCoachModeState(_settingsToolbar.GetCoachModeEnabled());
+                    _settingsToolbar.SyncSettingsToolbarHiddenState(_settingsToolbarHidden);
+                    // Apply the persisted capture-exclusion preference to the just-
+                    // created overlay surfaces (they register with CaptureExclusion
+                    // defaulting ON; this honors a saved OFF). See CaptureExclusion.
+                    CaptureExclusion.SetEnabled(_settingsToolbar.GetExcludeOverlaysFromCaptureEnabled());
+                    _hotkeyController!.Bindings = _settingsToolbar.GetHotkeyBindings();
+                    _hotkeyController.WireRegisteredListener();
+                    bool showSystemTrayIcon = _settingsToolbar.GetShowTaskbarIcon();
 #if DEBUG
-                showSystemTrayIcon = true;
+                    showSystemTrayIcon = true;
 #endif
-                _showSystemTrayIconAfterStartup = showSystemTrayIcon;
+                    _showSystemTrayIconAfterStartup = showSystemTrayIcon;
 
-                // Start with toolbar disabled
-                _settingsToolbar.SetEnabled(false);
+                    // Start with toolbar disabled
+                    _settingsToolbar.SetEnabled(false);
 
-                // Subscribe to system-wide window-state events so we get
-                // INSTANT notification when the board is minimized/closed,
-                // instead of waiting up to a frame interval (which can be
-                // hundreds of ms during heavy vision work).
-                //
-                // CRITICAL: Hook MUST be registered on this UI thread, not
-                // the main thread. SetWinEventHook with WINEVENT_OUTOFCONTEXT
-                // delivers events via the calling thread's message pump -
-                // the main thread is the vision loop and has no pump, so
-                // events would never fire. Application.Run(_overlay) below
-                // is what pumps messages on this thread.
-                bool hookOk = WindowTracker.RegisterWindowStateHook(OnSystemWindowEvent);
-                if (_diagLoggingEnabled)
-                {
-                    LogDiag("WINTRACK", hookOk
-                        ? "system-event hook registered (UI thread)"
-                        : "FAILED to register system-event hook");
+                    // Subscribe to system-wide window-state events so we get
+                    // INSTANT notification when the board is minimized/closed,
+                    // instead of waiting up to a frame interval (which can be
+                    // hundreds of ms during heavy vision work).
+                    //
+                    // CRITICAL: Hook MUST be registered on this UI thread, not
+                    // the main thread. SetWinEventHook with WINEVENT_OUTOFCONTEXT
+                    // delivers events via the calling thread's message pump -
+                    // the main thread is the vision loop and has no pump, so
+                    // events would never fire. Application.Run(_overlay) below
+                    // is what pumps messages on this thread.
+                    bool hookOk = WindowTracker.RegisterWindowStateHook(OnSystemWindowEvent);
+                    if (_diagLoggingEnabled)
+                    {
+                        LogDiag("WINTRACK", hookOk
+                            ? "system-event hook registered (UI thread)"
+                            : "FAILED to register system-event hook");
+                    }
+
+                    _ = _overlay.Handle;
+                    // Prove that the message pump has processed at least one
+                    // queued callback before Main performs any synchronous
+                    // Invoke calls during startup.
+                    _overlay.BeginInvoke(new Action(() =>
+                    {
+                        try { uiPumpReady.Set(); } catch { }
+                    }));
+                    Application.Run(_overlay);
+                    CrashDiagnostics.WriteLifecycleEvent(
+                        "UI_MESSAGE_LOOP_RETURNED",
+                        $"expected={_uiShutdownExpected} overlayDisposed={_overlay?.IsDisposed ?? true}");
+
+                    if (!_uiShutdownExpected)
+                    {
+                        var failure = new InvalidOperationException(
+                            "The ChessKit UI message loop stopped unexpectedly.");
+                        _uiThreadFailure = failure;
+                        _uiMessageLoopStopped = true;
+                        Environment.ExitCode = 1;
+                        WriteCrashRecord("UiMessageLoop", failure, terminating: true);
+                    }
                 }
-
-                _ = _overlay.Handle;
-                ready.Set();
-                Application.Run(_overlay);
+                catch (Exception ex)
+                {
+                    _uiThreadFailure = ex;
+                    _uiMessageLoopStopped = true;
+                    Environment.ExitCode = 1;
+                    WriteCrashRecord("UiThread", ex, terminating: true);
+                }
+                finally
+                {
+                    _uiMessageLoopStopped = true;
+                    try { uiPumpReady.Set(); } catch { }
+                }
             })
             { IsBackground = true };
             uiThread.SetApartmentState(ApartmentState.STA);
             uiThread.Start();
-            ready.WaitOne();
+            if (!uiPumpReady.WaitOne(TimeSpan.FromSeconds(15)))
+            {
+                throw new TimeoutException(
+                    "ChessKit's UI message pump did not start within 15 seconds.");
+            }
+
+            if (_uiThreadFailure != null)
+                throw new InvalidOperationException("ChessKit's UI thread failed during startup.", _uiThreadFailure);
+            if (_uiMessageLoopStopped)
+                throw new InvalidOperationException("ChessKit's UI thread stopped during startup.");
 
             if (!RunStartupFlow())
             {
+                if (_uiThreadFailure != null || (_uiMessageLoopStopped && !_uiShutdownExpected))
+                {
+                    throw new InvalidOperationException(
+                        "ChessKit's UI thread stopped during the startup flow.",
+                        _uiThreadFailure);
+                }
+
+                CrashDiagnostics.MarkCleanExit("startup canceled");
                 CloseUiThreadAfterStartupCancel();
                 return;
             }
@@ -214,7 +270,15 @@ partial class Program
             ShowStartupStatus("Checking Chess Kit license...", 18, indeterminate: true);
             if (!await _licenseEnforcer!.EnforceAsync())
             {
+                if (_uiThreadFailure != null || (_uiMessageLoopStopped && !_uiShutdownExpected))
+                {
+                    throw new InvalidOperationException(
+                        "ChessKit's UI thread stopped during license verification.",
+                        _uiThreadFailure);
+                }
+
                 // User chose to exit at the "servers unreachable" prompt.
+                CrashDiagnostics.MarkCleanExit("license prompt exit");
                 CloseUiThreadAfterStartupCancel();
                 return;
             }
@@ -244,6 +308,8 @@ partial class Program
             catch (Exception ex)
             {
                 Log($"[ERROR] Failed to initialize server-side detector: {ex.Message}");
+                WriteCrashRecord("BoardVision initialization", ex, terminating: true);
+                Environment.ExitCode = 1;
                 CloseStartupStatus();
 #if DEBUG
                 Console.ReadKey(true);
@@ -328,7 +394,7 @@ partial class Program
             _perfStopwatch.Start();
 
             // Main loop
-            while (!cts.IsCancellationRequested)
+            while (!cts.IsCancellationRequested && !_uiMessageLoopStopped)
             {
                 try
                 {
@@ -606,48 +672,11 @@ partial class Program
                             if (_lastTrackedBox.HasValue)
                             {
                                 var cachedBoardRect = _lastTrackedBox.Value;
-
-                                // Still update overlay positions with cached board rect
-                                if (_evalBarEnabled && _evalBar != null)
-                                {
-                                    var r = cachedBoardRect;
-                                    _evalBar.UpdatePosition(new Rectangle(r.X, r.Y, r.Width, r.Height));
-                                }
-
-                                if (_engineLinesEnabled && _engineLines != null)
-                                {
-                                    var r = cachedBoardRect;
-                                    _engineLines.UpdatePosition(new Rectangle(r.X, r.Y, r.Width, r.Height));
-                                }
-
-
-                                // Keep arrows tracking the board even when
-                                // FEN detection is paused (menu expanded).
-                                // Synchronous SetWindowPos via Bounds - no
-                                // redraw, just moves the form.
-                                if (_overlay != null)
-                                {
-                                    var r = cachedBoardRect;
-                                    _overlay.SetBoardScreenPosition(new Rectangle(r.X, r.Y, r.Width, r.Height));
-                                }
-
-                                // Keep toolbar position stable. Use window
-                                // rect when tracking, board rect otherwise.
-                                if (_settingsToolbar != null)
-                                {
-                                    if (_trackedHwnd != IntPtr.Zero
-                                        && WindowTracker.TryGetWindowRect(_trackedHwnd, out var menuToolbarWinRect))
-                                    {
-                                        _settingsToolbar.UpdateWindowPosition(new Rectangle(
-                                            menuToolbarWinRect.Left, menuToolbarWinRect.Top,
-                                            menuToolbarWinRect.Width, menuToolbarWinRect.Height));
-                                    }
-                                    else
-                                    {
-                                        var r = cachedBoardRect;
-                                        _settingsToolbar.UpdatePosition(new Rectangle(r.X, r.Y, r.Width, r.Height));
-                                    }
-                                }
+                                // Detection pauses while settings are open, but all
+                                // surfaces still follow real window movement. The
+                                // shared dispatcher suppresses identical geometry so
+                                // this 60 FPS branch cannot flood the UI queue.
+                                UpdateTrackedSurfaceGeometry(cachedBoardRect);
                             }
                             else
                             {
@@ -797,11 +826,11 @@ partial class Program
                                     // overlay is showing (including those lingering pixels) to
                                     // the live board; it is rect-only, cheap, and no-ops when
                                     // the overlay is hidden.
-                                    if (_overlay != null)
-                                    {
-                                        _overlay.BeginInvoke(new Action(() =>
-                                            _overlay.SetBoardScreenPosition(new Rectangle(projected.X, projected.Y, projected.Width, projected.Height))));
-                                    }
+                                    UpdateOverlayPositionIfChanged(new Rectangle(
+                                        projected.X,
+                                        projected.Y,
+                                        projected.Width,
+                                        projected.Height));
 
                                     windowTrackHandledFrame = !windowResizing0 && !hardWindowLayoutJump;
                                     windowTrackVerifyDue = windowResizing0 || hardWindowLayoutJump;
@@ -828,11 +857,11 @@ partial class Program
                                     // Unconditional (see the resize branch above): lingering
                                     // arrow pixels must follow the live rect even while
                                     // _showingMoves is false mid-resize.
-                                    if (_overlay != null)
-                                    {
-                                        _overlay.BeginInvoke(new Action(() =>
-                                            _overlay.SetBoardScreenPosition(new Rectangle(projected.X, projected.Y, projected.Width, projected.Height))));
-                                    }
+                                    UpdateOverlayPositionIfChanged(new Rectangle(
+                                        projected.X,
+                                        projected.Y,
+                                        projected.Width,
+                                        projected.Height));
                                     windowTrackVerifyDue = true;
                                     // Fall through to vision below to refresh.
                                 }
@@ -1501,8 +1530,7 @@ partial class Program
                                 if (_overlay != null && _showingMoves)
                                 {
                                     var r = trackedBox;
-                                    _overlay.BeginInvoke(new Action(() =>
-                                        _overlay.SetBoardScreenPosition(new Rectangle(r.X, r.Y, r.Width, r.Height))));
+                                    UpdateOverlayPositionIfChanged(new Rectangle(r.X, r.Y, r.Width, r.Height));
                                 }
                             }
                             else if (!forceGateFenProbe && IsExternalBoardGeometryUnstable())
@@ -1758,7 +1786,28 @@ partial class Program
                                         _fpsDiagP2FenCalls++;
 #endif
 
-                                        if (!string.IsNullOrEmpty(fen) && fen != "8/8/8/8/8/8/8/8 w KQkq - 0 1")
+                                        bool suppressExternalFenForUnstableGeometry =
+                                            !string.IsNullOrEmpty(fen) &&
+                                            fen != "8/8/8/8/8/8/8/8 w KQkq - 0 1" &&
+                                            !IsActiveAnalysisBoardFen(fen) &&
+                                            IsExternalBoardGeometryUnstable();
+
+                                        if (suppressExternalFenForUnstableGeometry)
+                                        {
+                                            // A detector response can arrive while the tracked crop is
+                                            // still moving. Do not normalize, confirm, or rebase the
+                                            // snapshot from that transitional image; doing so can pair a
+                                            // rotated canonical FEN with the old display projection and
+                                            // re-arm the raw-change fuse as soon as geometry settles.
+                                            _invalidFenFrames = 0;
+                                            ResetSuspectEmptyFenFrames();
+                                            ResetPendingFenCandidate();
+                                            LogDiag(
+                                                "FEN",
+                                                $"observation ignored while external board geometry is unstable " +
+                                                $"(raw={GetBoardPosition(fen)})");
+                                        }
+                                        else if (!string.IsNullOrEmpty(fen) && fen != "8/8/8/8/8/8/8/8 w KQkq - 0 1")
                                         {
                                             _invalidFenFrames = 0;
                                             ResetSuspectEmptyFenFrames();
@@ -1767,17 +1816,27 @@ partial class Program
 
                                             string candidateFen = fen;
                                             bool? detectedBoardFlipped = null;
+                                            bool authoritativeOrientation = false;
 
                                             if (!IsActiveAnalysisBoardFen(fen))
                                             {
-                                                candidateFen = NormalizeExternalDetectedFen(fen, out detectedBoardFlipped);
-                                                if (IsExternalBoardGeometryUnstable())
-                                                {
-                                                    detectedBoardFlipped = null;
-                                                }
+                                                candidateFen = NormalizeExternalDetectedFen(
+                                                    fen,
+                                                    out detectedBoardFlipped,
+                                                    out authoritativeOrientation);
                                             }
 
-                                            if (candidateFen == _currentFEN)
+                                            string currentBoardPosition = GetBoardPosition(_currentFEN);
+                                            string candidateBoardPosition = GetBoardPosition(candidateFen);
+                                            bool sameExternalVisualPlacement =
+                                                !_currentFenIsAnalysisBoard &&
+                                                !string.IsNullOrWhiteSpace(currentBoardPosition) &&
+                                                string.Equals(
+                                                    candidateBoardPosition,
+                                                    currentBoardPosition,
+                                                    StringComparison.Ordinal);
+
+                                            if (candidateFen == _currentFEN || sameExternalVisualPlacement)
                                             {
                                                 bool recoveredSamePositionAfterRawChange =
                                                     !_currentFenIsAnalysisBoard &&
@@ -1799,6 +1858,14 @@ partial class Program
                                                 }
                                                 else
                                                 {
+                                                    if (sameExternalVisualPlacement && candidateFen != _currentFEN)
+                                                    {
+                                                        LogDiag(
+                                                            "FEN",
+                                                            $"absorbing same visual board with metadata-only FEN difference " +
+                                                            $"(current={_currentFEN}, observed={candidateFen})");
+                                                    }
+
                                                     if (recoveredSamePositionAfterRawChange &&
                                                         boardDiff is not { ChangedSquares: 0 })
                                                     {
@@ -1815,9 +1882,31 @@ partial class Program
                                                     UpdateConfirmedBoardSnapshot(boardView);
                                                     ResetPendingFenCandidate();
                                                     _externalRawBoardChangeSettleUntilUtc = DateTime.MinValue;
+                                                    // This frame proved the visible placement is still the
+                                                    // confirmed board. Rebase the diff snapshot above and
+                                                    // disarm the raw-change fuse before its per-frame check can
+                                                    // hide perfectly current arrows. Nonvisual FEN metadata
+                                                    // (castling order, counters, inferred turn) must not keep a
+                                                    // stale pixel baseline alive.
+                                                    _pendingRawHideSinceUtc = DateTime.MinValue;
+                                                    _latencyT0Utc = DateTime.MinValue;
+                                                    _latencyT0ChangedSquares = 0;
                                                     _kinglessReadStreak = 0; // same-as-confirmed read = plausible board present
 
+                                                    bool externalDisplayOrientationChanged =
+                                                        !_currentFenIsAnalysisBoard &&
+                                                            ApplyExternalDisplayOrientation(
+                                                                detectedBoardFlipped,
+                                                                "stable same-FEN observation",
+                                                                authoritativeObservation: authoritativeOrientation);
+
                                                     bool staticHighlightChangedSide = TryApplyStaticLastMoveHighlightTurnHintAndQueue(_currentFEN, boardView);
+                                                    if (externalDisplayOrientationChanged)
+                                                    {
+                                                        HandleExternalDisplayOrientationChanged(
+                                                            "external display orientation changed");
+                                                    }
+
                                                     if (!staticHighlightChangedSide &&
                                                         recoveredSamePositionAfterRawChange &&
                                                         _continuousAnalysisEnabled &&
@@ -1850,14 +1939,10 @@ partial class Program
                                                 string confirmedFen = ConfirmFenObservation(candidateFen);
                                                 if (!string.IsNullOrEmpty(confirmedFen))
                                                 {
-                                                    // Keep this here as a second chance for unusual
-                                                    // callers, but the normal hot path now pins inside
-                                                    // NormalizeExternalDetectedFen before equality checks.
-                                                    TryPinExternalOrientationFromRawInitialFen(fen, out _);
-
                                                     bool externalBoardFlipChanged = ApplyExternalDisplayOrientation(
                                                         detectedBoardFlipped,
-                                                        "confirmed FEN observation");
+                                                        "confirmed FEN observation",
+                                                        authoritativeObservation: authoritativeOrientation);
                                                     confirmedFen = MergeDetectedFenWithHistory(_currentFEN, confirmedFen);
 
                                                     // EXPERIMENT A (shadow): could we have inferred this move
@@ -1871,7 +1956,10 @@ partial class Program
                                                         !string.IsNullOrEmpty(_currentFEN))
                                                     {
                                                         PredictiveVision.RunShadowAsync(
-                                                            _currentFEN, confirmedFen, boardDiff.ChangedSquareDetails, _boardIsFlipped);
+                                                            _currentFEN,
+                                                            confirmedFen,
+                                                            boardDiff.ChangedSquareDetails,
+                                                            GetEffectiveBoardFlipped(_currentFEN));
                                                     }
 
                                                     ApplyConfirmedFen(confirmedFen, boardView);
@@ -1944,53 +2032,10 @@ partial class Program
                                 }
                             }
 
-                            // Update all overlay positions
-                            if (_evalBarEnabled && _evalBar != null)
-                            {
-                                var r = trackedBox;
-                                _evalBar.UpdatePosition(new Rectangle(r.X, r.Y, r.Width, r.Height));
-                            }
-
-                            if (_engineLinesEnabled && _engineLines != null)
-                            {
-                                var r = trackedBox;
-                                _engineLines.UpdatePosition(new Rectangle(r.X, r.Y, r.Width, r.Height));
-                            }
-
-
-                            // Per-frame overlay position update. Arrows are
-                            // drawn in form-LOCAL coords inside OverlayForm,
-                            // so SetBoardScreenPosition just moves the form
-                            // (synchronous Win32 SetWindowPos) and Windows
-                            // composites the existing pixel buffer at the
-                            // new location. No redraw involved - same
-                            // tracking mechanism as the toolbar, instant.
-                            if (_overlay != null)
-                            {
-                                var r = trackedBox;
-                                _overlay.SetBoardScreenPosition(new Rectangle(r.X, r.Y, r.Width, r.Height));
-                            }
-
-                            // Always update settings toolbar position. Prefer
-                            // window-rect-based positioning (notch attached to
-                            // top of the board window) when we're tracking
-                            // a window - that's both faster and looks more
-                            // attached than floating above the board.
-                            if (_settingsToolbar != null)
-                            {
-                                if (_trackedHwnd != IntPtr.Zero
-                                    && WindowTracker.TryGetWindowRect(_trackedHwnd, out var winRect))
-                                {
-                                    _settingsToolbar.UpdateWindowPosition(new Rectangle(
-                                        winRect.Left, winRect.Top,
-                                        winRect.Width, winRect.Height));
-                                }
-                                else
-                                {
-                                    var r = trackedBox;
-                                    _settingsToolbar.UpdatePosition(new Rectangle(r.X, r.Y, r.Width, r.Height));
-                                }
-                            }
+                            // Per-frame calls are cheap after change-detection: static
+                            // boards dispatch nothing, while real movement still tracks
+                            // at the capture cadence.
+                            UpdateTrackedSurfaceGeometry(trackedBox);
 
                             MaybeRecoverStableSparseArrows();
                             ReconcileExternalArrowOverlay();
@@ -2061,13 +2106,32 @@ partial class Program
                 {
                     break;
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    DateTime now = DateTime.UtcNow;
+                    if (now >= _lastMainLoopExceptionRecordUtc.AddSeconds(10))
+                    {
+                        _lastMainLoopExceptionRecordUtc = now;
+                        Log($"[TRACKING LOOP] Frame failed: {ex}");
+                        WriteCrashRecord("MainTrackingLoop", ex, terminating: false);
+                    }
+
+                    // Avoid a hot retry loop if a persistent frame-path fault
+                    // starts failing before the normal frame pacing delay.
+                    await Task.Delay(25);
+                }
             }
+
+            bool plannedMainShutdown = cts.IsCancellationRequested;
+            bool uiThreadFailed = _uiThreadFailure != null ||
+                (_uiMessageLoopStopped && !plannedMainShutdown);
+            _uiShutdownExpected = true;
 
             // Cleanup
             DisableHighResolutionTimer();
             DisposeAllEngines();
             _detector?.Dispose();
+            ScreenCapture.Cleanup();
             ResetConfirmedBoardSnapshot();
             if (_overlay != null && _overlay.IsHandleCreated)
             {
@@ -2117,10 +2181,22 @@ partial class Program
 
             Log("\n[INFO] Shutdown complete");
             RefreshDebugView("Shutdown complete");
+            if (uiThreadFailed)
+            {
+                CrashDiagnostics.WriteLifecycleEvent(
+                    "UI_FAILURE_CLEANUP_COMPLETED",
+                    $"failure={_uiThreadFailure?.GetType().FullName ?? "message-loop-return"}");
+            }
+            else
+            {
+                CrashDiagnostics.MarkCleanExit("main loop completed");
+            }
         }
         catch (Exception ex)
         {
             Log($"[FATAL] {ex}");
+            WriteCrashRecord("Program.Main", ex, terminating: true);
+            Environment.ExitCode = 1;
 #if DEBUG
             Console.ReadKey(true);
 #else

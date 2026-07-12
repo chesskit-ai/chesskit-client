@@ -1408,7 +1408,17 @@ partial class Program
             getSideToMove: GetSideToMove,
             getBoardPosition: GetBoardPosition,
             ensureLicensedFeatureAvailable: (feature, notifyUser) => EnsureLicensedFeatureAvailable(feature, notifyUser),
-            tryResolveOrientationDecision: TryResolveOrientationDecision,
+            tryResolveOrientationDecision: (
+                string fen,
+                bool isAnalysisBoard,
+                char referenceColor,
+                out bool? detectedBoardFlipped) =>
+                TryResolveOrientationDecision(
+                    fen,
+                    isAnalysisBoard,
+                    referenceColor,
+                    out detectedBoardFlipped,
+                    out _),
             isUsableEnginePath: IsUsableEnginePath,
             isHumanEnginePath: IsHumanEnginePath,
             getEngineFailureMessage: GetEngineFailureMessage,

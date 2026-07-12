@@ -159,7 +159,25 @@ namespace ChessKit
                 }
             }
 
-            return validRights.Length > 0 ? validRights.ToString() : "-";
+            // FEN castling rights have one canonical display order. The board
+            // scan above encounters the a-file rook before the h-file rook, so
+            // appending during that scan used to produce QKqk. Besides being
+            // non-standard, that made visually identical detector reads
+            // (KQkq) compare unequal and repeatedly tripped the raw-change
+            // arrow fuse. Preserve only the rights we validated, but emit them
+            // in canonical KQkq order.
+            if (validRights.Length == 0)
+                return "-";
+
+            string discoveredRights = validRights.ToString();
+            var canonicalRights = new System.Text.StringBuilder(4);
+            foreach (char right in new[] { 'K', 'Q', 'k', 'q' })
+            {
+                if (discoveredRights.Contains(right))
+                    canonicalRights.Append(right);
+            }
+
+            return canonicalRights.Length > 0 ? canonicalRights.ToString() : "-";
         }
 
         public static bool IsSparseExternalBoardPosition(string boardPosition)
