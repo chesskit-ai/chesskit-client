@@ -13,7 +13,7 @@ Screen-vision board recognition · a click-through overlay · any UCI engine · 
 
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64-555)
-![Release](https://img.shields.io/github/v/release/chesskit-ai/chesskit-client)
+[![Release](https://img.shields.io/badge/release-v1.1.4-007ec6)](https://github.com/chesskit-ai/chesskit-client/releases/latest)
 ![Portable](https://img.shields.io/badge/install-none%20·%20portable-success)
 
 [Download](https://github.com/chesskit-ai/chesskit-client/releases/latest) · [chesskit.ai](https://chesskit.ai)
