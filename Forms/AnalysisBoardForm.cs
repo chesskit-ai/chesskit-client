@@ -417,6 +417,7 @@ namespace ChessKit
             });
             _matchAnalyzeGameButton = CreateButton("Analyze Game", (_, _) =>
             {
+                AppUsageTelemetryClient.QueueFeatureOpen("game_analysis", "analysis_board");
                 try
                 {
                     GameAnalysisRequest request = BuildCurrentGameAnalysisRequest();
@@ -871,12 +872,34 @@ namespace ChessKit
                 ClearAnalysisVariations();
                 Invalidate();
                 EmitSnapshot();
+                if (mirroredMove != null)
+                    QueueAnalysisBoardLiveMoveTelemetry(fen);
                 return true;
             }
             catch
             {
                 return false;
             }
+        }
+
+        private void QueueAnalysisBoardLiveMoveTelemetry(string fen)
+        {
+            if (_matchRunning ||
+                string.Equals(_analysisMode, "OFF", StringComparison.OrdinalIgnoreCase) ||
+                string.IsNullOrWhiteSpace(fen))
+            {
+                return;
+            }
+
+            int? remainingMoves = _mirrorModeEnabled && FreeTierServerState.IsFreeLimited
+                ? FreeTierServerState.FreeMovesRemaining
+                : null;
+            AppUsageTelemetryClient.QueueMoveDetected(
+                "analysis_board_live",
+                fen,
+                BuildLimits.IsFreeEdition ? "free_analysis_board" : "licensed_analysis_board",
+                "analysis_board_live",
+                remainingMoves: remainingMoves);
         }
 
         public void SetAnalysisArrows(IEnumerable<MoveArrow> arrows)
@@ -4519,6 +4542,14 @@ namespace ChessKit
 
             _bookOpeningTitle = view.OpeningName;
             _bookMoves = view.Moves.Take(BuildLimits.OpeningBookMoveLimit).ToList();
+            if (BuildLimits.IsFreeEdition && view.Moves.Count > _bookMoves.Count)
+            {
+                AppUsageTelemetryClient.QueueFreeLimitHit(
+                    "opening_book",
+                    cooldownBlocked: false,
+                    remainingMoves: _bookMoves.Count,
+                    limitMoves: BuildLimits.OpeningBookMoveLimit);
+            }
             _bookStatusText = _bookMoves.Count == 0
                 ? "No embedded-book moves found."
                 : "";
@@ -4616,6 +4647,13 @@ namespace ChessKit
         private void ToggleAnalysisMode(string mode)
         {
             _analysisMode = _analysisMode == mode ? "OFF" : mode;
+            string feature = mode switch
+            {
+                "WHITE" => "analysis_white",
+                "BLACK" => "analysis_black",
+                _ => "analysis_both"
+            };
+            AppUsageTelemetryClient.QueueFeatureToggle(feature, _analysisMode == mode, "analysis_board");
             RefreshAnalysisModeButtons();
             AnalysisModeChanged?.Invoke(_analysisMode);
         }
@@ -4758,12 +4796,14 @@ namespace ChessKit
                 return;
             }
 
+            AppUsageTelemetryClient.QueueFeatureToggle("match_engine", !_matchRunning, "analysis_board");
             MatchCommandRequested?.Invoke(AnalysisBoardMatchCommandType.ToggleRunning);
         }
 
         private void ToggleOpeningBook()
         {
             _openingBookEnabled = !_openingBookEnabled;
+            AppUsageTelemetryClient.QueueFeatureToggle("opening_book", _openingBookEnabled, "analysis_board");
             RefreshBookButton();
             LayoutControls();
 
@@ -5349,6 +5389,7 @@ namespace ChessKit
                 SyncStatus();
                 Invalidate();
                 EmitSnapshot();
+                QueueAnalysisBoardLiveMoveTelemetry(_board.ToFen());
                 return true;
             }
             catch (Exception ex)

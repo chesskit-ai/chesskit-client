@@ -19,6 +19,7 @@ partial class Program
                     break;
 
                 // Toggle overlay on/off
+                AppUsageTelemetryClient.QueueFeatureToggle("show_arrows", !_isTracking, "hotkey");
                 if (!_isTracking)
                 {
                     TryEnableOverlayTrackingForUserAction("overlay and live board detection");
@@ -98,6 +99,10 @@ partial class Program
                 {
                     _stockfish.ClearAllDepthTracking();
                     ToggleContinuousAnalysis(false);
+                    AppUsageTelemetryClient.QueueFeatureToggle(
+                        "analysis_white",
+                        _continuousAnalysisEnabled && !_analysisIsBlackPerspective && !_analysisBothEnabled,
+                        "hotkey");
                 }
                 else
                 {
@@ -116,6 +121,10 @@ partial class Program
                 {
                     _stockfish.ClearAllDepthTracking();
                     ToggleContinuousAnalysis(true);
+                    AppUsageTelemetryClient.QueueFeatureToggle(
+                        "analysis_black",
+                        _continuousAnalysisEnabled && _analysisIsBlackPerspective && !_analysisBothEnabled,
+                        "hotkey");
                 }
                 else
                 {
@@ -155,6 +164,11 @@ partial class Program
                             : GetRequestedAnalysisPerspective(_currentFEN, _analysisIsBlackPerspective);
                         ToggleContinuousAnalysis(desiredBlackPerspective);
                     }
+
+                    AppUsageTelemetryClient.QueueFeatureToggle(
+                        "analysis_both",
+                        _analysisBothEnabled && _continuousAnalysisEnabled,
+                        "hotkey");
                 }
                 else
                 {
@@ -181,6 +195,7 @@ partial class Program
             case HotkeyCommand.ToggleEngineLines:
                 // Toggle engine lines display
                 _engineLinesEnabled = !_engineLinesEnabled;
+                AppUsageTelemetryClient.QueueFeatureToggle("engine_lines", _engineLinesEnabled, "hotkey");
 
                 if (_settingsToolbar != null)
                 {
@@ -222,6 +237,7 @@ partial class Program
             case HotkeyCommand.ToggleEvalBar:
                 // Toggle evaluation bar
                 _evalBarEnabled = !_evalBarEnabled;
+                AppUsageTelemetryClient.QueueFeatureToggle("eval_bar", _evalBarEnabled, "hotkey");
 
                 if (_settingsToolbar != null)
                 {

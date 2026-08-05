@@ -314,6 +314,12 @@ partial class Program
             {
                 UpdateFreeExternalWatermark();
                 LogDiag("ENGINE", $"analysis queue skipped: Free cooldown ({FreeTierServerState.CooldownRemainingSeconds}s left)");
+                AppUsageTelemetryClient.QueueFreeLimitHit(
+                    "external_board",
+                    cooldownBlocked: true,
+                    remainingMoves: FreeTierServerState.IsFreeLimited
+                        ? FreeTierServerState.FreeMovesRemaining
+                        : null);
                 return false;
             }
 
@@ -2239,7 +2245,15 @@ partial class Program
             if (isAnalysisBoardPosition)
             {
                 if (_analysisBoardController!.IsFreeLiveLimitReached())
+                {
+                    AppUsageTelemetryClient.QueueFreeLimitHit(
+                        "analysis_board_live",
+                        cooldownBlocked: true,
+                        remainingMoves: FreeTierServerState.IsFreeLimited
+                            ? FreeTierServerState.FreeMovesRemaining
+                            : null);
                     return false;
+                }
             }
             else if (IsFreeExternalAnalysisLimitReached())
             {

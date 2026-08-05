@@ -171,6 +171,7 @@ partial class Program
         if (_stockfish != null) _stockfish.ClearAllDepthTracking();
         Log($"[{DateTime.Now:HH:mm:ss}] Exit confirmed");
         CrashDiagnostics.MarkCleanExit("user confirmed exit");
+        AppUsageTelemetryClient.FlushForExit(TimeSpan.FromSeconds(2));
         Environment.Exit(0);
     }
 

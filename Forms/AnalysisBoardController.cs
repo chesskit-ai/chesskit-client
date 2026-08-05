@@ -610,6 +610,14 @@ namespace ChessKit
             int depth = BuildLimits.ClampDepth(requestedDepth);
             int thinkTimeMs = depth <= 0 ? 35 : Math.Max(250, depth * 30);
             var movesToAnalyze = request.Moves.Take(BuildLimits.GameAnalysisPlyLimit).ToList();
+            if (BuildLimits.IsFreeEdition && movesToAnalyze.Count < request.Moves.Count)
+            {
+                AppUsageTelemetryClient.QueueFreeLimitHit(
+                    "game_analysis",
+                    cooldownBlocked: false,
+                    pliesUsed: movesToAnalyze.Count,
+                    plyLimit: BuildLimits.GameAnalysisPlyLimit);
+            }
             var (openingBoundaryIndex, endgameBoundaryIndex) = ComputePhaseBoundaries(movesToAnalyze);
 
             using var engine = new UCIEngine(enginePath)
@@ -1468,6 +1476,8 @@ namespace ChessKit
             int completedGames = _analysisBoardMatchWhiteWins + _analysisBoardMatchBlackWins + _analysisBoardMatchDraws;
             if (_analysisBoardMatchGameLimit > 0 && completedGames >= _analysisBoardMatchGameLimit)
             {
+                if (BuildLimits.IsFreeEdition)
+                    AppUsageTelemetryClient.QueueFreeLimitHit("match_engine", cooldownBlocked: false);
                 StopAnalysisBoardMatch($"Match complete: {completedGames.ToString(CultureInfo.InvariantCulture)}/{_analysisBoardMatchGameLimit.ToString(CultureInfo.InvariantCulture)} games.");
                 return;
             }
@@ -2907,6 +2917,11 @@ namespace ChessKit
                                 : stageLabel == "stream"
                                     ? $"Depth {result.AnalysisDepth}..."
                                     : $"Analysis ready at depth {result.AnalysisDepth}.");
+                            AppUsageTelemetryClient.QueueAnalysisResult(
+                                "analysis_board",
+                                fen,
+                                result.AnalysisDepth,
+                                limitedVariations.Count);
                         }
                         else
                         {

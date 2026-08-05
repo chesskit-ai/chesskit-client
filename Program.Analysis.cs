@@ -613,6 +613,11 @@ partial class Program
                         _showingMoves = true;
                         _analysisBoardForm.SetAnalysisArrows(arrows);
                         RememberDisplayedArrowDepth(capturedFEN, achievedDepth);
+                        AppUsageTelemetryClient.QueueAnalysisResult(
+                            "analysis_board",
+                            capturedFEN,
+                            displayedResultDepth,
+                            arrows.Count);
                         double stageLatencyMs = (DateTime.UtcNow - analysisStartedUtc).TotalMilliseconds;
                         string totalLatencySuffix = "";
                         if (_lastConfirmedFenForTiming == capturedFEN && _lastConfirmedFenAtUtc != DateTime.MinValue)
@@ -649,6 +654,11 @@ partial class Program
                             _overlay.ShowMoveArrows(new Rectangle(r.X, r.Y, r.Width, r.Height), arrows, generation, 60000);
                             RememberExternalOverlayArrowsShown(capturedFEN, arrows.Count);
                             RememberDisplayedArrowDepth(capturedFEN, achievedDepth);
+                            AppUsageTelemetryClient.QueueAnalysisResult(
+                                "external_board",
+                                capturedFEN,
+                                displayedResultDepth,
+                                arrows.Count);
                             double stageLatencyMs = (DateTime.UtcNow - analysisStartedUtc).TotalMilliseconds;
                             string totalLatencySuffix = "";
                             if (_lastConfirmedFenForTiming == capturedFEN && _lastConfirmedFenAtUtc != DateTime.MinValue)

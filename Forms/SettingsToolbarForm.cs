@@ -94,6 +94,7 @@ namespace ChessKit
         private bool _settingsToolbarHidden = false;
         private bool _toolbarNetworkStatsEnabled = false;
         private bool _excludeOverlaysFromCapture = true;
+        private UsageAnalyticsConsent _usageAnalyticsConsent = UsageAnalyticsConsent.Unknown;
         private HotkeyBindings _hotkeys = new();
 
         private const int ExpandedHeaderTop = 52;
@@ -352,6 +353,7 @@ namespace ChessKit
                 _settingsToolbarHidden = settings.SettingsToolbarHidden;
                 _toolbarNetworkStatsEnabled = settings.ToolbarNetworkStatsEnabled;
                 _excludeOverlaysFromCapture = settings.ExcludeOverlaysFromCapture;
+                _usageAnalyticsConsent = settings.UsageAnalyticsConsent;
                 _hotkeys = settings.Hotkeys?.Clone() ?? new HotkeyBindings();
                 _hotkeys.Normalize();
             }
@@ -361,11 +363,11 @@ namespace ChessKit
             }
         }
 
-        private void SaveAppSettings()
+        private bool SaveAppSettings()
         {
             if (_appSettingsManager == null)
             {
-                return;
+                return false;
             }
 
             var settings = _appSettingsManager.Load();
@@ -393,8 +395,31 @@ namespace ChessKit
             settings.SettingsToolbarHidden = _settingsToolbarHidden;
             settings.ToolbarNetworkStatsEnabled = _toolbarNetworkStatsEnabled;
             settings.ExcludeOverlaysFromCapture = _excludeOverlaysFromCapture;
+            // The toolbar is constructed before first-run onboarding. Until the
+            // startup flow synchronizes its resolved choice below, never let the
+            // stale Unknown value overwrite an affirmative/negative choice that
+            // was just persisted by the consent dialog.
+            if (_usageAnalyticsConsent != UsageAnalyticsConsent.Unknown ||
+                settings.UsageAnalyticsConsent == UsageAnalyticsConsent.Unknown)
+            {
+                settings.UsageAnalyticsConsent = _usageAnalyticsConsent;
+                if (_usageAnalyticsConsent != UsageAnalyticsConsent.Unknown)
+                    settings.UsageAnalyticsConsentVersion = UsageAnalyticsConsentNotice.CurrentVersion;
+            }
             settings.Hotkeys = _hotkeys.Clone();
-            _appSettingsManager.Save(settings);
+            return _appSettingsManager.Save(settings);
+        }
+
+        internal void SyncUsageAnalyticsConsent(UsageAnalyticsConsent consent)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => SyncUsageAnalyticsConsent(consent)));
+                return;
+            }
+
+            _usageAnalyticsConsent = consent;
+            Invalidate();
         }
 
         // Push live metrics + free/connection state from the capture loop. Internal
@@ -1778,6 +1803,28 @@ namespace ChessKit
             SettingChanged?.Invoke("ToolbarNetworkStatsEnabled", _toolbarNetworkStatsEnabled);
         }
 
+        private void ToggleUsageAnalyticsSetting()
+        {
+            if (!AppUsageTelemetryClient.IsAvailable)
+                return;
+
+            bool enabled = _usageAnalyticsConsent != UsageAnalyticsConsent.Enabled;
+            _usageAnalyticsConsent = enabled
+                ? UsageAnalyticsConsent.Enabled
+                : UsageAnalyticsConsent.Disabled;
+            bool persisted = SaveAppSettings();
+            SettingChanged?.Invoke("UsageAnalyticsEnabled", enabled);
+            if (!persisted)
+            {
+                MessageBox.Show(
+                    this,
+                    $"Usage diagnostics are {(enabled ? "enabled" : "disabled")} for this run, but Chess Kit could not save the choice. Check that the app or settings folder is writable before restarting.",
+                    "Could not save diagnostics choice",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
+        }
+
         private void OpenKeyBindingsDialog()
         {
             SettingChanged?.Invoke("ObstructingUiActive", true);
@@ -2059,6 +2106,18 @@ namespace ChessKit
                         Invalidate();
                         m.Result = IntPtr.Zero;
                         return;
+                    }
+
+                    if (ShowUsageAnalyticsRow)
+                    {
+                        var usageAnalyticsRect = GetUsageAnalyticsCheckboxRect();
+                        if (usageAnalyticsRect.Contains(contentClickPos))
+                        {
+                            ToggleUsageAnalyticsSetting();
+                            Invalidate();
+                            m.Result = IntPtr.Zero;
+                            return;
+                        }
                     }
 
                     var captureExclusionRect = GetExcludeOverlaysFromCaptureCheckboxRect();
@@ -3768,6 +3827,23 @@ namespace ChessKit
             var networkStatsLabelRect = new Rectangle(networkStatsRect.Right + 10, y + 80 + TaskbarWindowRowShift, contentWidth - 10, 40);
             g.DrawString("Show network stats beside ping", _labelFont, _textBrush, networkStatsLabelRect, rowFmt);
 
+            if (ShowUsageAnalyticsRow)
+            {
+                var usageAnalyticsRect = GetUsageAnalyticsCheckboxRect();
+                g.DrawRectangle(outlinePen, usageAnalyticsRect);
+                if (_usageAnalyticsConsent == UsageAnalyticsConsent.Enabled)
+                {
+                    DrawCheckboxCheckmark(g, usageAnalyticsRect, Color.FromArgb(100, 200, 100));
+                }
+
+                var usageAnalyticsLabelRect = new Rectangle(
+                    usageAnalyticsRect.Right + 10,
+                    y + 120 + TaskbarWindowRowShift,
+                    contentWidth - 10,
+                    ExpandedRowHeight);
+                g.DrawString("Share app usage diagnostics", _labelFont, _textBrush, usageAnalyticsLabelRect, rowFmt);
+            }
+
             // --- Capture-exclusion row (40px, both editions): hides the arrow/
             // eval/engine-lines overlays from screen capture. Every button row
             // below shifts down by CaptureExclusionRowShift (always on). ---
@@ -3778,10 +3854,14 @@ namespace ChessKit
                 DrawCheckboxCheckmark(g, captureExclusionRect, Color.FromArgb(100, 200, 100));
             }
 
-            var captureExclusionLabelRect = new Rectangle(captureExclusionRect.Right + 10, y + 120 + TaskbarWindowRowShift, contentWidth - 10, 40);
+            var captureExclusionLabelRect = new Rectangle(
+                captureExclusionRect.Right + 10,
+                y + 120 + TaskbarWindowRowShift + UsageAnalyticsRowShift,
+                contentWidth - 10,
+                ExpandedRowHeight);
             g.DrawString("Hide overlays from screen capture", _labelFont, _textBrush, captureExclusionLabelRect, rowFmt);
 
-            int buttonRowTop = y + 124 + TaskbarWindowRowShift + CaptureExclusionRowShift;
+            int buttonRowTop = y + 124 + TaskbarWindowRowShift + UsageAnalyticsRowShift + CaptureExclusionRowShift;
             var keyButtonRect = GetKeyBindingsButtonRect();
             DrawAppActionButton(g, keyButtonRect, buttonBorderPen, _hoveredAppAction == "keys");
             g.DrawString("Key Bindings", _labelFont, _textBrush, keyButtonRect, centerFmt);
@@ -4304,17 +4384,33 @@ namespace ChessKit
         // below the tray-icon row shifts down by one 40px row when visible.
         private static int TaskbarWindowRowShift => ShowTaskbarWindowRow ? ExpandedRowHeight : 0;
 
+        // Public/source builds can compile the telemetry transport out entirely.
+        // In that case this row consumes no space and has no hit target.
+        private static bool ShowUsageAnalyticsRow => AppUsageTelemetryClient.IsAvailable;
+        private static int UsageAnalyticsRowShift => ShowUsageAnalyticsRow ? ExpandedRowHeight : 0;
+
         // The capture-exclusion row is shown in BOTH editions (stream-safety +
         // feedback-prevention benefit everyone), so it is an always-on 40px
-        // shift applied to the button rows and the section height. It sits one
-        // row below the network-stats row.
+        // shift applied to the button rows and the section height. It sits below
+        // the optional usage-diagnostics row when that transport is available.
         private const int CaptureExclusionRowShift = ExpandedRowHeight;
+
+        private Rectangle GetUsageAnalyticsCheckboxRect()
+        {
+            if (!ShowUsageAnalyticsRow)
+                return Rectangle.Empty;
+
+            var appRect = GetAppSectionRect();
+            int x = appRect.X + 18 + SpeculativeContentIndent;
+            int y = appRect.Y + 50 + 120 + TaskbarWindowRowShift + (ExpandedRowHeight - LowerCheckboxSize) / 2;
+            return new Rectangle(x, y, LowerCheckboxSize, LowerCheckboxSize);
+        }
 
         private Rectangle GetExcludeOverlaysFromCaptureCheckboxRect()
         {
             var appRect = GetAppSectionRect();
             int x = appRect.X + 18 + SpeculativeContentIndent;
-            int y = appRect.Y + 50 + 120 + TaskbarWindowRowShift + (40 - LowerCheckboxSize) / 2;
+            int y = appRect.Y + 50 + 120 + TaskbarWindowRowShift + UsageAnalyticsRowShift + (ExpandedRowHeight - LowerCheckboxSize) / 2;
             return new Rectangle(x, y, LowerCheckboxSize, LowerCheckboxSize);
         }
 
@@ -4355,7 +4451,7 @@ namespace ChessKit
         {
             var appRect = GetAppSectionRect();
             int x = appRect.X + 18 + SpeculativeContentIndent;
-            int y = appRect.Y + 50 + 124 + TaskbarWindowRowShift + CaptureExclusionRowShift;
+            int y = appRect.Y + 50 + 124 + TaskbarWindowRowShift + UsageAnalyticsRowShift + CaptureExclusionRowShift;
             return new Rectangle(x, y, 150, LowerButtonHeight);
         }
 
@@ -4363,7 +4459,7 @@ namespace ChessKit
         {
             var appRect = GetAppSectionRect();
             int x = appRect.X + 18 + SpeculativeContentIndent;
-            int y = appRect.Y + 50 + 164 + TaskbarWindowRowShift + CaptureExclusionRowShift;
+            int y = appRect.Y + 50 + 164 + TaskbarWindowRowShift + UsageAnalyticsRowShift + CaptureExclusionRowShift;
             return new Rectangle(x, y, 150, LowerButtonHeight);
         }
 
@@ -4371,7 +4467,7 @@ namespace ChessKit
         {
             var appRect = GetAppSectionRect();
             int x = appRect.X + 18 + SpeculativeContentIndent;
-            int y = appRect.Y + 50 + 204 + TaskbarWindowRowShift + CaptureExclusionRowShift;
+            int y = appRect.Y + 50 + 204 + TaskbarWindowRowShift + UsageAnalyticsRowShift + CaptureExclusionRowShift;
             return new Rectangle(x, y, 150, LowerButtonHeight);
         }
 
@@ -4379,7 +4475,7 @@ namespace ChessKit
         {
             var appRect = GetAppSectionRect();
             int x = appRect.X + 18 + SpeculativeContentIndent;
-            int y = appRect.Y + 50 + 324 + TaskbarWindowRowShift + CaptureExclusionRowShift;
+            int y = appRect.Y + 50 + 324 + TaskbarWindowRowShift + UsageAnalyticsRowShift + CaptureExclusionRowShift;
             return new Rectangle(x, y, 150, LowerButtonHeight);
         }
 
@@ -4387,7 +4483,7 @@ namespace ChessKit
         {
             var appRect = GetAppSectionRect();
             int x = appRect.X + 18 + SpeculativeContentIndent;
-            int y = appRect.Y + 50 + 244 + TaskbarWindowRowShift + CaptureExclusionRowShift;
+            int y = appRect.Y + 50 + 244 + TaskbarWindowRowShift + UsageAnalyticsRowShift + CaptureExclusionRowShift;
             return new Rectangle(x, y, 150, LowerButtonHeight);
         }
 
@@ -4395,7 +4491,7 @@ namespace ChessKit
         {
             var appRect = GetAppSectionRect();
             int x = appRect.X + 18 + SpeculativeContentIndent;
-            int y = appRect.Y + 50 + 284 + TaskbarWindowRowShift + CaptureExclusionRowShift;
+            int y = appRect.Y + 50 + 284 + TaskbarWindowRowShift + UsageAnalyticsRowShift + CaptureExclusionRowShift;
             return new Rectangle(x, y, 150, LowerButtonHeight);
         }
 
@@ -4436,10 +4532,9 @@ namespace ChessKit
         private Rectangle GetAppSectionRect()
         {
             var speculativeRect = GetSpeculativeSectionRect();
-            // The taskbar-window row adds one 40px row when visible (Licensed
-            // only); the capture-exclusion row adds one always (both editions).
-            // Everything below each shifts down by the same amount.
-            int height = AppSectionHeight + TaskbarWindowRowShift + CaptureExclusionRowShift;
+            // Optional taskbar-window and usage-diagnostics rows add 40px when
+            // visible; capture exclusion adds one row in both editions.
+            int height = AppSectionHeight + TaskbarWindowRowShift + UsageAnalyticsRowShift + CaptureExclusionRowShift;
             return new Rectangle(speculativeRect.X, speculativeRect.Bottom + ExpandedSectionGap, speculativeRect.Width, height);
         }
 
@@ -4682,6 +4777,3 @@ namespace ChessKit
         }
     }
 }
-
-
-

@@ -154,6 +154,137 @@ namespace ChessKit
         }
     }
 
+    internal sealed class UsageAnalyticsConsentForm : Form
+    {
+        public UsageAnalyticsConsent Consent { get; private set; } = UsageAnalyticsConsent.Disabled;
+
+        public UsageAnalyticsConsentForm()
+        {
+            Text = "Optional usage diagnostics";
+            ShowIcon = false;
+            ShowInTaskbar = true;
+            TopMost = true;
+            StartPosition = FormStartPosition.CenterScreen;
+            FormBorderStyle = FormBorderStyle.Sizable;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            AutoScroll = true;
+            AutoScaleMode = AutoScaleMode.Dpi;
+            Font = FreeUi.CreateFont(10f);
+            ClientSize = FreeUi.GetStartupClientSize(720, 540);
+            MinimumSize = new Size(520, 420);
+            BackColor = FreeUi.Colors.Window;
+            ForeColor = FreeUi.Colors.Text;
+
+            var root = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                Padding = new Padding(28, 24, 28, 24),
+                BackColor = FreeUi.Colors.Window,
+                ColumnCount = 1,
+                RowCount = 4
+            };
+            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            Controls.Add(root);
+
+            root.Controls.Add(new Label
+            {
+                Text = "Help improve Chess Kit?",
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                Font = FreeUi.CreateFont(22f, FontStyle.Bold, semibold: true),
+                ForeColor = Color.White,
+                Margin = new Padding(0, 0, 0, 14)
+            }, 0, 0);
+
+            var details = new RichTextBox
+            {
+                Dock = DockStyle.Fill,
+                ReadOnly = true,
+                BorderStyle = BorderStyle.None,
+                BackColor = FreeUi.Colors.Panel,
+                ForeColor = FreeUi.Colors.Text,
+                Font = FreeUi.CreateFont(11.25f),
+                Text = BuildConsentText(),
+                Margin = new Padding(0),
+                DetectUrls = false,
+                TabStop = false,
+                ScrollBars = RichTextBoxScrollBars.Vertical
+            };
+            root.Controls.Add(FreeUi.WrapPanel(details, new Padding(18)), 0, 1);
+
+            root.Controls.Add(new Label
+            {
+                Text = "This choice is optional, is separate from the terms, and can be changed later in App Settings.",
+                Dock = DockStyle.Top,
+                AutoSize = false,
+                Height = FreeUi.ControlHeight(9.75f, 2, 14),
+                Font = FreeUi.CreateFont(9.75f),
+                ForeColor = FreeUi.Colors.Muted,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Margin = new Padding(0, 14, 0, 18)
+            }, 0, 2);
+
+            var buttons = FreeUi.CreateButtonBar(2);
+            var noThanksButton = FreeUi.CreateButton("No thanks", primary: false);
+            noThanksButton.Dock = DockStyle.Fill;
+            noThanksButton.DialogResult = DialogResult.Cancel;
+            noThanksButton.Click += (_, _) => Decline();
+
+            var shareButton = FreeUi.CreateButton("Share usage diagnostics", primary: false);
+            shareButton.Dock = DockStyle.Fill;
+            shareButton.Click += (_, _) =>
+            {
+                Consent = UsageAnalyticsConsent.Enabled;
+                DialogResult = DialogResult.OK;
+                Close();
+            };
+
+            buttons.Controls.Add(noThanksButton, 0, 0);
+            buttons.Controls.Add(shareButton, 1, 0);
+            root.Controls.Add(buttons, 0, 3);
+            CancelButton = noThanksButton;
+
+            Shown += (_, _) => noThanksButton.Focus();
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            if (Consent != UsageAnalyticsConsent.Enabled)
+            {
+                Consent = UsageAnalyticsConsent.Disabled;
+                if (DialogResult == DialogResult.None)
+                    DialogResult = DialogResult.Cancel;
+            }
+
+            base.OnFormClosing(e);
+        }
+
+        private void Decline()
+        {
+            Consent = UsageAnalyticsConsent.Disabled;
+            DialogResult = DialogResult.Cancel;
+            Close();
+        }
+
+        private static string BuildConsentText()
+        {
+            return
+                "Chess Kit can send optional, pseudonymous usage diagnostics to help improve the app, understand feature adoption, and inform product and marketing decisions. Nothing is sent unless you choose to share.\n\n" +
+                "If enabled, diagnostics include:\n" +
+                "• a pseudonymous hashed device ID and a random ID for each app session;\n" +
+                "• app launch/session activity, feature interactions, and individual feature/toggle states;\n" +
+                "• board detection and board-analysis activity, without board screenshots or raw positions/FEN;\n" +
+                "• free-limit and cooldown events; and\n" +
+                "• performance timing, lightweight CPU/GPU usage, app version, build, and edition information.\n\n" +
+                "Chess Kit does not send screenshots, license keys, payment data, chess-site or account information, usernames, email addresses, machine names, file or model paths, or your complete local settings/configuration.\n\n" +
+                "Diagnostics never control whether the app works, and you can turn sharing off at any time.";
+        }
+    }
+
     internal sealed class FreeWelcomeForm : Form
     {
         private readonly Label _title;

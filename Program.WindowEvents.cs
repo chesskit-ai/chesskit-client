@@ -440,6 +440,23 @@ partial class Program
             else if (whoMoved.HasValue)
             {
                 ArrowTimeline.Log("MOVE_DETECTED", fen: confirmedFen, extra: $"by={(whoMoved.Value == 'w' ? "white" : "black")} user={(whoMoved.Value == _userColor)} both={_analysisBothEnabled}");
+                bool mirroredAnalysisAssistanceActive =
+                    _analysisBoardController?.IsMirrorEnabled == true &&
+                    _analysisBoardController.AnalysisEnabled;
+                if (!isAnalysisBoardSource &&
+                    !IsActiveAnalysisBoardFen(confirmedFen) &&
+                    !mirroredAnalysisAssistanceActive)
+                {
+                    int? remainingMoves = FreeTierServerState.IsFreeLimited
+                        ? FreeTierServerState.FreeMovesRemaining
+                        : null;
+                    AppUsageTelemetryClient.QueueMoveDetected(
+                        "external_board",
+                        confirmedFen,
+                        BuildLimits.IsFreeEdition ? "free_external" : "licensed_external",
+                        "external_board",
+                        remainingMoves: remainingMoves);
+                }
                 Log($"[{DateTime.Now:HH:mm:ss}] Move by {(whoMoved.Value == 'w' ? "WHITE" : "BLACK")}");
                 RefreshDebugView($"Move by {(whoMoved.Value == 'w' ? "WHITE" : "BLACK")}");
                 _inferredSideToMove = whoMoved.Value == 'w' ? 'b' : 'w';
@@ -507,6 +524,10 @@ partial class Program
         }
 
         _currentFEN = confirmedFen;
+        string positionSource = isAnalysisBoardSource || IsActiveAnalysisBoardFen(confirmedFen)
+            ? "analysis_board"
+            : "external_board";
+        AppUsageTelemetryClient.QueuePositionDetected(positionSource, confirmedFen, "board_detected");
         Volatile.Write(ref _pendingConfirmedFenTarget, "");
         if (!IsActiveAnalysisBoardFen(confirmedFen))
             _externalTrackedPositionCount = Math.Min(_externalTrackedPositionCount + 1, 1024);

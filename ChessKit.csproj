@@ -14,15 +14,37 @@
     <Product>Chess Kit</Product>
     <Company>Chess Kit</Company>
     <Description>Chess Kit</Description>
-    <Version>1.1.4</Version>
-    <AssemblyVersion>1.1.4.0</AssemblyVersion>
-    <FileVersion>1.1.4.0</FileVersion>
-    <InformationalVersion>1.1.4</InformationalVersion>
+    <Version>1.1.5</Version>
+    <AssemblyVersion>1.1.5.0</AssemblyVersion>
+    <FileVersion>1.1.5.0</FileVersion>
+    <InformationalVersion>1.1.5</InformationalVersion>
+    <EnableAppUsageTelemetry Condition="'$(EnableAppUsageTelemetry)' == ''">false</EnableAppUsageTelemetry>
     <ApplicationIcon>Assets\Brand\chess-kit-icon.ico</ApplicationIcon>
 	<OutputType Condition="'$(Configuration)' == 'Debug'">Exe</OutputType>
     <OutputType Condition="'$(Configuration)' == 'Release'">WinExe</OutputType>
     <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
   </PropertyGroup>
+
+  <!-- Publish profiles are imported after this project file is evaluated, so
+       apply the opt-in constant immediately before compilation. This keeps the
+       normal source build off while allowing Official-win-x64.pubxml to enable it. -->
+  <Target Name="ConfigureAppUsageTelemetryCompilation"
+          BeforeTargets="_GenerateCompileDependencyCache;CoreCompile"
+          Condition="'$(EnableAppUsageTelemetry)' == 'true'">
+    <PropertyGroup>
+      <DefineConstants>$(DefineConstants);CHESSKIT_APP_USAGE_TELEMETRY</DefineConstants>
+    </PropertyGroup>
+  </Target>
+
+  <!-- A release packager can require this marker and refuse to ship a stale
+       source-default build that compiled the transport out. -->
+  <Target Name="WriteAppUsageTelemetryBuildMarker"
+          AfterTargets="Publish"
+          Condition="'$(EnableAppUsageTelemetry)' == 'true' and '$(PublishDir)' != ''">
+    <WriteLinesToFile File="$(PublishDir)app-usage-telemetry.enabled"
+                      Lines="enabled=true;consent=required;version=$(Version)"
+                      Overwrite="true" />
+  </Target>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">
     <DebugType>none</DebugType>

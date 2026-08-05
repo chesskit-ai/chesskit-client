@@ -285,6 +285,25 @@ partial class Program
             UpdateStartupStatus(BuildLimits.IsFreeEdition ? "Starting Free Edition..." : "License verified.", 32);
             await Task.Delay(120);
 #endif
+            // The optional diagnostics choice was collected during the startup
+            // flow, but no event is sent until the runtime license state is now
+            // known. Ordinary source builds compile this call to a no-op.
+            AppSettings usageSettings = _appSettingsManager.Load();
+            bool usageConsentIsCurrent =
+                usageSettings.UsageAnalyticsConsent == UsageAnalyticsConsent.Enabled &&
+                usageSettings.UsageAnalyticsConsentVersion >= UsageAnalyticsConsentNotice.CurrentVersion;
+            UsageAnalyticsConsent effectiveUsageConsent = usageConsentIsCurrent
+                ? UsageAnalyticsConsent.Enabled
+                : usageSettings.UsageAnalyticsConsent == UsageAnalyticsConsent.Unknown
+                    ? UsageAnalyticsConsent.Unknown
+                    : UsageAnalyticsConsent.Disabled;
+            _settingsToolbar?.SyncUsageAnalyticsConsent(effectiveUsageConsent);
+            AppUsageTelemetryClient.StartSession(
+                usageConsentIsCurrent,
+                () => _licenseEnforcer?.CurrentPlan ?? "");
+            if (_licenseEnforcer?.StartupNetworkErrorEncountered == true)
+                AppUsageTelemetryClient.QueueError("license", "license_network_error");
+
             UpdateStartupStatus("Preparing system tray...", 42);
             InitializeTaskbarIconAfterStartup();
             StartStartupUpdateCheck();
@@ -308,6 +327,7 @@ partial class Program
             catch (Exception ex)
             {
                 Log($"[ERROR] Failed to initialize server-side detector: {ex.Message}");
+                AppUsageTelemetryClient.QueueError("vision", "vision_initialization_failed");
                 WriteCrashRecord("BoardVision initialization", ex, terminating: true);
                 Environment.ExitCode = 1;
                 CloseStartupStatus();
@@ -317,6 +337,7 @@ partial class Program
                 MessageBox.Show($"Failed to initialize server-side BoardVision:\n{ex.Message}",
                     "Chess Kit - Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
 #endif
+                await AppUsageTelemetryClient.FlushForExitAsync();
                 return;
             }
 
@@ -2126,6 +2147,8 @@ partial class Program
             bool uiThreadFailed = _uiThreadFailure != null ||
                 (_uiMessageLoopStopped && !plannedMainShutdown);
             _uiShutdownExpected = true;
+            if (uiThreadFailed)
+                AppUsageTelemetryClient.QueueError("app", "ui_thread_failed");
 
             // Cleanup
             DisableHighResolutionTimer();
@@ -2179,6 +2202,10 @@ partial class Program
             // low-level global keyboard hook as Main's body unwinds.
             _hotkeyController?.Dispose();
 
+            // Keep the telemetry session attached through cleanup so an exception
+            // above reaches the outer fatal handler and can still be recorded.
+            await AppUsageTelemetryClient.FlushForExitAsync();
+
             Log("\n[INFO] Shutdown complete");
             RefreshDebugView("Shutdown complete");
             if (uiThreadFailed)
@@ -2196,6 +2223,8 @@ partial class Program
         {
             Log($"[FATAL] {ex}");
             WriteCrashRecord("Program.Main", ex, terminating: true);
+            AppUsageTelemetryClient.QueueError("app", "fatal_error");
+            await AppUsageTelemetryClient.FlushForExitAsync();
             Environment.ExitCode = 1;
 #if DEBUG
             Console.ReadKey(true);

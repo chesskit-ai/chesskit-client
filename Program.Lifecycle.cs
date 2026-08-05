@@ -254,6 +254,8 @@ partial class Program
                     if (_analysisBoardForm == null)
                         return;
 
+                    AppUsageTelemetryClient.QueueFeatureOpen("analysis_board", "system_tray");
+
                     if (_analysisBoardForm.InvokeRequired)
                         _analysisBoardForm.BeginInvoke(new Action(() => _analysisBoardForm.ShowAnalysisBoard()));
                     else
@@ -263,7 +265,11 @@ partial class Program
                 onShowHardwareId: ShowHardwareIdFromTaskbar,
                 onShowLicenseStatus: ShowLicenseStatusFromTaskbar,
                 onShowAbout: ShowAboutFromTaskbar,
-                onVisitWebsite: OpenChessKitWebsite,
+                onVisitWebsite: () =>
+                {
+                    AppUsageTelemetryClient.QueueFeatureOpen("visit_website", "system_tray");
+                    OpenChessKitWebsite();
+                },
                 confirmHideIcon: ConfirmHideTaskbarIconIfNeeded,
                 persistShowTaskbarIcon: v => _settingsToolbar?.SyncTaskbarIconState(v),
                 onExit: RequestApplicationExit);
@@ -300,7 +306,13 @@ partial class Program
     {
         _taskbarWindow ??= new TaskbarWindow(
             onShowToolbar: RestoreSettingsToolbarFromTaskbar,
-            onOpenAnalysisBoard: () => _analysisBoardForm?.ShowAnalysisBoard(),
+            onOpenAnalysisBoard: () =>
+            {
+                if (_analysisBoardForm == null)
+                    return;
+                AppUsageTelemetryClient.QueueFeatureOpen("analysis_board", "taskbar_window");
+                _analysisBoardForm.ShowAnalysisBoard();
+            },
             onToggleOverlay: () => _hotkeyController!.TriggerToggleOverlay(),
             onShowHardwareId: ShowHardwareIdFromTaskbar,
             onShowAbout: ShowAboutFromTaskbar,

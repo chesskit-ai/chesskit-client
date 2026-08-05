@@ -1495,6 +1495,22 @@ partial class Program
                 }
             }
 
+            // App-usage diagnostics are a distinct, optional choice. The
+            // transport is compiled out of ordinary source builds; official
+            // distributions show this once before any telemetry session can
+            // start. Declining (or closing the dialog) still continues startup.
+            if (AppUsageTelemetryClient.IsAvailable &&
+                (settings.UsageAnalyticsConsent == UsageAnalyticsConsent.Unknown ||
+                 (settings.UsageAnalyticsConsent == UsageAnalyticsConsent.Enabled &&
+                  settings.UsageAnalyticsConsentVersion < UsageAnalyticsConsentNotice.CurrentVersion)))
+            {
+                using var diagnosticsForm = new UsageAnalyticsConsentForm();
+                diagnosticsForm.ShowDialog();
+                settings.UsageAnalyticsConsent = diagnosticsForm.Consent;
+                settings.UsageAnalyticsConsentVersion = UsageAnalyticsConsentNotice.CurrentVersion;
+                settingsManager.Save(settings);
+            }
+
             bool legacyFreeWelcomeCompleted = BuildLimits.IsFreeEdition && settings.LegacyFreeWelcomeCompleted;
             if (!persistStartupFlow || (!settings.StartupWelcomeCompleted && !legacyFreeWelcomeCompleted))
             {

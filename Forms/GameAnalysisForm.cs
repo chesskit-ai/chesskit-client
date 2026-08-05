@@ -493,6 +493,7 @@ namespace ChessKit
             if (BuildLimits.IsFreeEdition && _freeAnalysisRunsUsed >= BuildLimits.GameAnalysisRunLimitPerLaunch)
             {
                 _statusLabel.Text = "Free Edition limit reached: restart Chess Kit to run one more game analysis, or upgrade for unlimited reviews.";
+                AppUsageTelemetryClient.QueueFreeLimitHit("game_analysis", cooldownBlocked: false);
                 return;
             }
 
@@ -549,6 +550,7 @@ namespace ChessKit
                     if (runVersion != _analysisRunVersion)
                         return;
 
+                    int previouslyVisibleCount = _results.Count;
                     _analysisRunning = false;
                     _results = data.MoveResults;
                     _annotatedPgn = data.AnnotatedPgn;
@@ -562,6 +564,7 @@ namespace ChessKit
                     _whiteSummaryCard.Apply(data.WhiteSummary);
                     _blackSummaryCard.Apply(data.BlackSummary);
                     PopulateMoveGrid();
+                    QueueVisibleGameAnalysisTelemetry(data.MoveResults, previouslyVisibleCount, analysisCompleted: true);
                     _progressPanel.Invalidate();
                     _chartPanel.Invalidate();
                     AnalysisCompleted?.Invoke(data);
@@ -591,6 +594,7 @@ namespace ChessKit
             if (IsDisposed || runVersion != _analysisRunVersion)
                 return;
 
+            int previouslyVisibleCount = _results.Count;
             _results = progress.MoveResults;
             _openingBoundaryIndex = progress.OpeningBoundaryIndex;
             _endgameBoundaryIndex = progress.EndgameBoundaryIndex;
@@ -599,8 +603,46 @@ namespace ChessKit
             _whiteSummaryCard.Apply(progress.WhiteSummary, waiting: progress.ProgressPercent <= 0 && progress.MoveResults.Count == 0);
             _blackSummaryCard.Apply(progress.BlackSummary, waiting: progress.ProgressPercent <= 0 && progress.MoveResults.Count == 0);
             PopulateMoveGrid();
+            QueueVisibleGameAnalysisTelemetry(progress.MoveResults, previouslyVisibleCount, analysisCompleted: false);
             _progressPanel.Invalidate();
             _chartPanel.Invalidate();
+        }
+
+        private static void QueueVisibleGameAnalysisTelemetry(
+            IReadOnlyList<GameAnalysisMoveResult> results,
+            int previouslyVisibleCount,
+            bool analysisCompleted)
+        {
+            int firstNewIndex = Math.Clamp(previouslyVisibleCount, 0, results.Count);
+            if (firstNewIndex == 0 && results.Count > 0)
+            {
+                string firstVisibleFen = results[0].FenAfter;
+                if (!string.IsNullOrWhiteSpace(firstVisibleFen))
+                    AppUsageTelemetryClient.QueuePositionDetected("game_analysis", firstVisibleFen, "game_analysis");
+            }
+
+            for (int index = firstNewIndex; index < results.Count; index++)
+            {
+                GameAnalysisMoveResult move = results[index];
+                if (!string.IsNullOrWhiteSpace(move.FenAfter))
+                {
+                    AppUsageTelemetryClient.QueueMoveDetected(
+                        "game_analysis",
+                        move.FenAfter,
+                        "game_analysis",
+                        "game_analysis");
+                }
+            }
+
+            if (analysisCompleted && results.Count > 0)
+            {
+                GameAnalysisMoveResult finalMove = results[^1];
+                string analysisFen = !string.IsNullOrWhiteSpace(finalMove.FenBefore)
+                    ? finalMove.FenBefore
+                    : finalMove.FenAfter;
+                if (!string.IsNullOrWhiteSpace(analysisFen))
+                    AppUsageTelemetryClient.QueueAnalysisResult("game_analysis", analysisFen, finalMove.Depth, lines: 1);
+            }
         }
 
         private void PopulateMoveGrid()
@@ -778,6 +820,7 @@ namespace ChessKit
             if (BuildLimits.IsFreeEdition && _freeCoachReportsUsed >= BuildLimits.GameAnalysisCoachLimitPerLaunch)
             {
                 _statusLabel.Text = "Free Edition limit reached: the AI coach can be opened once per Chess Kit run.";
+                AppUsageTelemetryClient.QueueFreeLimitHit("coach", cooldownBlocked: false);
                 return;
             }
 
@@ -795,6 +838,7 @@ namespace ChessKit
                     MoveSelected?.Invoke(move);
             });
             form.Show(this);
+            AppUsageTelemetryClient.QueueFeatureOpen("coach", "game_analysis");
         }
 
         private void DrawChart(Graphics g, Rectangle rect)

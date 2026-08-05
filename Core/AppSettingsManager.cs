@@ -32,6 +32,18 @@ namespace ChessKit
         Notch
     }
 
+    public enum UsageAnalyticsConsent
+    {
+        Unknown,
+        Enabled,
+        Disabled
+    }
+
+    internal static class UsageAnalyticsConsentNotice
+    {
+        public const int CurrentVersion = 1;
+    }
+
     public enum HotkeyCommand
     {
         ToggleOverlay,
@@ -185,6 +197,8 @@ namespace ChessKit
         public bool LegacyFreeTermsAccepted { get; set; } = false;
         public string LegacyFreeTermsVersion { get; set; } = "";
         public bool LegacyFreeWelcomeCompleted { get; set; } = false;
+        public UsageAnalyticsConsent UsageAnalyticsConsent { get; set; } = UsageAnalyticsConsent.Unknown;
+        public int UsageAnalyticsConsentVersion { get; set; } = 0;
         public bool DiagnosticsLatencyLogEnabled { get; set; } = false;
         public bool DiagnosticsBoardTraceEnabled { get; set; } = false;
         public bool RemoteEngineEnabled { get; set; } = true;
@@ -200,10 +214,15 @@ namespace ChessKit
         private const string SettingsFileName = "settings.ini";
         private const string LegacySettingsFileName = "app_settings.json";
         private readonly string _settingsPath;
+        private readonly string _usageAnalyticsOptOutPath;
 
         public AppSettingsManager(string settingsPath)
         {
             _settingsPath = ResolveSettingsPath(settingsPath);
+            string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            _usageAnalyticsOptOutPath = string.IsNullOrWhiteSpace(localAppData)
+                ? _settingsPath + ".usage-analytics.disabled"
+                : Path.Combine(localAppData, "ChessKit", "usage-analytics.disabled");
         }
 
         public static string GetDefaultSettingsPath()
@@ -262,7 +281,7 @@ namespace ChessKit
 
                 if (!File.Exists(_settingsPath))
                 {
-                    return new AppSettings();
+                    return ApplyPersistentUsageAnalyticsOptOut(new AppSettings());
                 }
 
                 var text = File.ReadAllText(_settingsPath);
@@ -271,16 +290,17 @@ namespace ChessKit
                     : DeserializeIni(text);
                 settings.Hotkeys ??= new HotkeyBindings();
                 settings.Hotkeys.Normalize();
-                return settings;
+                return ApplyPersistentUsageAnalyticsOptOut(settings);
             }
             catch
             {
-                return new AppSettings();
+                return ApplyPersistentUsageAnalyticsOptOut(new AppSettings());
             }
         }
 
-        public void Save(AppSettings settings)
+        public bool Save(AppSettings settings)
         {
+            bool settingsSaved = false;
             try
             {
                 settings.LastUpdatedUtc = DateTime.UtcNow;
@@ -295,23 +315,87 @@ namespace ChessKit
                 if (!File.Exists(_settingsPath))
                 {
                     File.Move(tempPath, _settingsPath);
-                    return;
+                }
+                else
+                {
+                    try
+                    {
+                        File.Replace(tempPath, _settingsPath, null);
+                    }
+                    catch
+                    {
+                        File.Copy(tempPath, _settingsPath, overwrite: true);
+                        File.Delete(tempPath);
+                    }
                 }
 
-                try
-                {
-                    File.Replace(tempPath, _settingsPath, null);
-                }
-                catch
-                {
-                    File.Copy(tempPath, _settingsPath, overwrite: true);
-                    File.Delete(tempPath);
-                }
+                settingsSaved = true;
             }
             catch
             {
                 // Best effort only.
             }
+
+            return PersistUsageAnalyticsOptOut(settings.UsageAnalyticsConsent, settingsSaved);
+        }
+
+        private AppSettings ApplyPersistentUsageAnalyticsOptOut(AppSettings settings)
+        {
+            try
+            {
+                if (File.Exists(_usageAnalyticsOptOutPath))
+                    settings.UsageAnalyticsConsent = UsageAnalyticsConsent.Disabled;
+            }
+            catch
+            {
+                // The normal settings value remains authoritative when the
+                // fail-closed marker cannot be inspected.
+            }
+
+            return settings;
+        }
+
+        private bool PersistUsageAnalyticsOptOut(UsageAnalyticsConsent consent, bool settingsSaved)
+        {
+            if (consent == UsageAnalyticsConsent.Disabled)
+            {
+                bool markerSaved = false;
+                try
+                {
+                    string? directory = Path.GetDirectoryName(_usageAnalyticsOptOutPath);
+                    if (!string.IsNullOrWhiteSpace(directory))
+                        Directory.CreateDirectory(directory);
+                    File.WriteAllText(_usageAnalyticsOptOutPath, "disabled=true\n", Encoding.UTF8);
+                    markerSaved = true;
+                }
+                catch
+                {
+                }
+
+                // Either durable location is enough to keep the next launch off.
+                return settingsSaved || markerSaved;
+            }
+
+            if (consent == UsageAnalyticsConsent.Enabled)
+            {
+                // Never remove a previous opt-out marker unless the affirmative
+                // replacement choice was successfully saved first.
+                if (!settingsSaved)
+                    return false;
+
+                try
+                {
+                    if (File.Exists(_usageAnalyticsOptOutPath))
+                        File.Delete(_usageAnalyticsOptOutPath);
+                    return true;
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+
+            return settingsSaved;
         }
 
         private static AppSettings DeserializeIni(string text)
@@ -362,7 +446,7 @@ namespace ChessKit
             settings.Hotkeys ??= new HotkeyBindings();
             StringBuilder builder = new();
             builder.AppendLine("; ChessKit portable settings");
-            builder.AppendLine("; Delete this file to reset accepted terms, welcome tour, and local preferences.");
+            builder.AppendLine("; Delete this file to reset accepted terms, welcome tour, and most local preferences.");
             builder.AppendLine("[Settings]");
 
             foreach (PropertyInfo property in typeof(AppSettings).GetProperties(BindingFlags.Instance | BindingFlags.Public))

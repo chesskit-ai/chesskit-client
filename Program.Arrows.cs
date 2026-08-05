@@ -1288,17 +1288,22 @@ partial class Program
     private static void UpdateAnalysisBoardSnapshot(AnalysisBoardSnapshot snapshot)
     {
         bool positionChanged = false;
+        bool fenChanged = false;
+        bool becameVisible = false;
+        string telemetryFen = snapshot.Fen ?? "";
         int sessionVersion = 0;
         lock (_analysisBoardStateLock)
         {
+            becameVisible = snapshot.Visible && !_lastAnalysisBoardSnapshotVisible;
             if (snapshot.Visible != _lastAnalysisBoardSnapshotVisible)
             {
                 _analysisBoardController!.ClearLastAnalysisKey();
                 _lastAnalysisBoardSnapshotVisible = snapshot.Visible;
             }
 
+            fenChanged = !string.Equals(_analysisBoardFen, telemetryFen, StringComparison.Ordinal);
             positionChanged =
-                !string.Equals(_analysisBoardFen, snapshot.Fen ?? "", StringComparison.Ordinal) ||
+                fenChanged ||
                 _analysisBoardIsFlipped != snapshot.BoardFlipped;
 
             _analysisBoardVisible = snapshot.Visible;
@@ -1306,13 +1311,20 @@ partial class Program
             _analysisBoardHasTrackedHistory = snapshot.HasTrackedHistory;
             _analysisBoardScreenRect = snapshot.BoardScreenBounds;
             _analysisBoardWindowScreenRect = snapshot.WindowScreenBounds;
-            _analysisBoardFen = snapshot.Fen ?? "";
+            _analysisBoardFen = telemetryFen;
 
             if (positionChanged)
             {
                 _analysisBoardController!.ClearLastAnalysisKey();
                 sessionVersion = _analysisBoardController!.AnalysisSessionVersion;
             }
+        }
+
+        if (snapshot.Visible &&
+            !string.IsNullOrWhiteSpace(telemetryFen) &&
+            (fenChanged || becameVisible))
+        {
+            AppUsageTelemetryClient.QueuePositionDetected("analysis_board", telemetryFen, "board_detected");
         }
 
         if (positionChanged && _analysisBoardController!.AnalysisEnabled && sessionVersion == _analysisBoardController!.AnalysisSessionVersion)

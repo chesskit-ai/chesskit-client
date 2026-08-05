@@ -46,6 +46,8 @@ namespace ChessKit
         // while the hot loop reads it. A Licensed session must never downgrade to
         // Free, so nothing in this class (or its callers) ever clears it.
         private volatile bool _fullVersionLicenseVerified = false;
+        private volatile bool _startupNetworkErrorEncountered = false;
+        private string _currentPlan = "";
 
         private CancellationTokenSource? _licenseMonitorCancellation = null;
         private Task? _licenseMonitorTask = null;
@@ -74,6 +76,20 @@ namespace ChessKit
         /// decide Free vs Licensed.
         /// </summary>
         public bool IsVerified => _fullVersionLicenseVerified;
+
+        /// <summary>
+        /// Last server-verified license plan for this process. Empty while the
+        /// app is running as the Free Edition. Accessed from the telemetry
+        /// worker, so reads and writes use Volatile for cross-thread visibility.
+        /// </summary>
+        public string CurrentPlan => Volatile.Read(ref _currentPlan) ?? "";
+
+        /// <summary>
+        /// True when startup encountered an unreachable license service. The
+        /// telemetry session begins only after startup verification, so Program
+        /// uses this sticky flag to report the already-handled diagnostic then.
+        /// </summary>
+        public bool StartupNetworkErrorEncountered => _startupNetworkErrorEncountered;
 
         /// <summary>
         /// Fired at most once per process, on the Free -> Licensed TRANSITION
@@ -129,6 +145,7 @@ namespace ChessKit
                 if (result.IsLicensed)
                 {
                     _fullVersionLicenseVerified = true;
+                    Volatile.Write(ref _currentPlan, result.Plan?.Trim() ?? "");
                     LicenseStatusInfo.SetReason(LicenseInactiveReason.None);
                     _log($"[LICENSE] Active license verified. Plan={result.Plan}, Expires={result.ExpiresAtUtc:O}");
                     StartMonitor(result);
@@ -152,6 +169,7 @@ namespace ChessKit
                 // NetworkError => the servers are unreachable. Do NOT silently fall to
                 // Free: to a paying user that looks exactly like a revoked license. Ask.
                 // (No prompt wired, e.g. Debug -> behave as before and continue Free.)
+                _startupNetworkErrorEncountered = true;
                 LicenseUnreachableChoice choice = _promptServerUnreachable?.Invoke(result)
                     ?? LicenseUnreachableChoice.ContinueFree;
 
@@ -216,6 +234,7 @@ namespace ChessKit
                     catch (Exception ex)
                     {
                         _log($"[LICENSE] Background check error (ignored): {ex.Message}");
+                        AppUsageTelemetryClient.QueueError("license", "license_network_error");
                         continue;
                     }
 
@@ -226,6 +245,7 @@ namespace ChessKit
                         // clear any inactive reason so the watermark/chip drops.
                         bool wasVerified = _fullVersionLicenseVerified;
                         _fullVersionLicenseVerified = true;
+                        Volatile.Write(ref _currentPlan, current.Plan?.Trim() ?? "");
                         LicenseStatusInfo.SetReason(LicenseInactiveReason.None);
                         _log($"[LICENSE] Background check OK. Plan={current.Plan}, Expires={current.ExpiresAtUtc:O}");
                         if (!wasVerified)
@@ -240,6 +260,7 @@ namespace ChessKit
 
                     if (current.State == LicenseValidationState.NetworkError)
                     {
+                        AppUsageTelemetryClient.QueueError("license", "license_network_error");
                         string networkReason = string.IsNullOrWhiteSpace(current.Message)
                             ? "Temporary network issue while checking license."
                             : current.Message;

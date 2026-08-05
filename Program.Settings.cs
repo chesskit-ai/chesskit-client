@@ -68,7 +68,12 @@ partial class Program
                 RequestApplicationExit();
                 break;
 
+            case "UsageAnalyticsEnabled":
+                AppUsageTelemetryClient.SetConsent(value is bool usageEnabled && usageEnabled);
+                break;
+
             case "OpenAnalysisBoard":
+                AppUsageTelemetryClient.QueueFeatureOpen("analysis_board");
                 if (_analysisBoardForm != null)
                 {
                     if (_analysisBoardForm.InvokeRequired)
@@ -83,6 +88,9 @@ partial class Program
                 break;
 
             case "ShowTaskbarIcon":
+                AppUsageTelemetryClient.QueueFeatureToggle(
+                    "show_taskbar_icon",
+                    value is bool showTaskbarIconTelemetry && showTaskbarIconTelemetry);
                 _systemTray?.SetVisible(value is bool showTaskbarIcon && showTaskbarIcon, persist: true);
                 break;
 
@@ -129,6 +137,7 @@ partial class Program
                 break;
 
             case "VisitWebsite":
+                AppUsageTelemetryClient.QueueFeatureOpen("visit_website");
                 OpenChessKitWebsite();
                 break;
 
@@ -162,6 +171,7 @@ partial class Program
                 _menuExpanded = (bool)value;
                 if (_menuExpanded)
                 {
+                    AppUsageTelemetryClient.QueueFeatureOpen("settings_menu");
                     Log($"[Settings] Menu expanded - pausing board detection");
                 }
                 else
@@ -188,6 +198,7 @@ partial class Program
                 break;
 
             case "ResetDepth":
+                AppUsageTelemetryClient.QueueFeatureOpen("reset_depth");
                 if (_stockfish != null)
                 {
                     _stockfish.ClearAllDepthTracking();
@@ -197,6 +208,7 @@ partial class Program
 
             case "AnalysisWhite":
                 bool enableWhite = (bool)value;
+                AppUsageTelemetryClient.QueueFeatureToggle("analysis_white", enableWhite);
                 if (enableWhite)
                 {
                     bool wasAlreadyAnalyzingWhite = _continuousAnalysisEnabled
@@ -256,6 +268,7 @@ partial class Program
 
             case "AnalysisBlack":
                 bool enableBlack = (bool)value;
+                AppUsageTelemetryClient.QueueFeatureToggle("analysis_black", enableBlack);
                 if (enableBlack)
                 {
                     bool wasAlreadyAnalyzingBlack = _continuousAnalysisEnabled
@@ -311,6 +324,7 @@ partial class Program
 
             case "AnalysisBoth":
                 bool enableBoth = (bool)value;
+                AppUsageTelemetryClient.QueueFeatureToggle("analysis_both", enableBoth);
                 if (enableBoth)
                 {
                     bool wasAlreadyAnalyzingBoth = _analysisBothEnabled && _continuousAnalysisEnabled;
@@ -484,6 +498,7 @@ partial class Program
 
             case "CoachModeEnabled":
                 _coachModeEnabled = value is bool coachEnabled && coachEnabled;
+                AppUsageTelemetryClient.QueueFeatureToggle("coach", _coachModeEnabled);
                 _settingsToolbar?.SyncCoachModeState(_coachModeEnabled);
                 Log($"[Settings] Coach mode {(_coachModeEnabled ? "enabled" : "disabled")}");
                 if (_stockfish != null)
@@ -541,6 +556,7 @@ partial class Program
 
             case "ShowEvalBar":
                 _evalBarEnabled = (bool)value;
+                AppUsageTelemetryClient.QueueFeatureToggle("eval_bar", _evalBarEnabled);
                 if (_evalBar != null)
                 {
                     _evalBar.SetEnabled(_evalBarEnabled && _isTracking);
@@ -626,6 +642,7 @@ partial class Program
 
             case "ShowEngineLines":
                 _engineLinesEnabled = (bool)value;
+                AppUsageTelemetryClient.QueueFeatureToggle("engine_lines", _engineLinesEnabled);
                 if (_engineLines != null)
                 {
                     _engineLines.SetEnabled(_engineLinesEnabled && _isTracking);
@@ -706,6 +723,7 @@ partial class Program
                 break;
 
             case "EngineChanged":
+                AppUsageTelemetryClient.QueueFeatureOpen("engine_selector");
                 string newEnginePath = (string)value;
                 if (IsUsableEnginePath(newEnginePath))
                 {

@@ -13,7 +13,7 @@ Screen-vision board recognition · a click-through overlay · any UCI engine · 
 
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64-555)
-[![Release](https://img.shields.io/badge/release-v1.1.4-007ec6)](https://github.com/chesskit-ai/chesskit-client/releases/latest)
+[![Release](https://img.shields.io/badge/release-v1.1.5-007ec6)](https://github.com/chesskit-ai/chesskit-client/releases/latest)
 ![Portable](https://img.shields.io/badge/install-none%20·%20portable-success)
 
 [Download](https://github.com/chesskit-ai/chesskit-client/releases/latest) · [chesskit.ai](https://chesskit.ai)
@@ -73,7 +73,7 @@ Typical end-to-end latency from a detected move to arrows on screen is **well un
 ### ⚡ Built for speed & privacy
 - PV cache + speculative prefetch keep the overlay responsive on the fastest time controls.
 - **No account** — licensing binds to a hashed **hardware ID** (raw serials are never sent or stored).
-- **Telemetry is opt-in and off by default**; logging is off by default.
+- Official downloads include optional, first-party app-usage diagnostics and ask before sending any app-usage diagnostics; standard source builds compile this capability out. Logging is off by default.
 
 ---
 
@@ -88,7 +88,7 @@ Typical end-to-end latency from a detected move to arrows on screen is **well un
 
 ## Download & run
 
-Grab the latest **[release](https://github.com/chesskit-ai/chesskit-client/releases/latest)** (or get it from **[chesskit.ai](https://chesskit.ai)**), unzip, and run `ChessKit.exe`. The build is **self-contained and portable** — no install, no .NET runtime, no registry writes. To remove it, just delete the folder.
+Grab the latest **[release](https://github.com/chesskit-ai/chesskit-client/releases/latest)** (or get it from **[chesskit.ai](https://chesskit.ai)**), unzip, and run `ChessKit.exe`. The build is **self-contained and portable** — no installer, no .NET runtime, and no registry writes. Most settings stay beside the executable. ChessKit can also use `%LocalAppData%\ChessKit` for crash evidence when the portable folder is not writable and for a durable, fail-closed app-diagnostics opt-out marker. Delete both the portable folder and that local-data folder for complete removal.
 
 ### Bring your own engine
 Drop any **UCI engine** into the `engines/` folder next to the executable and select it in the toolbar — the bundled **Stockfish** also works out of the box. A local engine gives you **unlimited, offline analysis on the analysis board**: no connection, no limits.
@@ -120,14 +120,16 @@ A **license** unlocks full-speed hosted vision and engine plus the rest — and 
 Requires the **.NET 10 SDK (Windows Desktop workload)** — this is needed *only* to compile; the shipped release needs none of it.
 
 ```
-dotnet build ChessKit.sln -c Release
+dotnet build ChessKit.csproj -c Release
 ```
 
 `-c Debug` is a console build with diagnostics. There is a single shipping build: at runtime it's the limited **Free Edition** until a valid license is verified, then fully **Licensed**. For a self-contained, portable binary:
 
 ```
-dotnet publish ChessKit/ChessKit.csproj -c Release -r win-x64 -p:SelfContained=true
+dotnet publish ChessKit.csproj -c Release -r win-x64 -p:SelfContained=true
 ```
+
+That standard source build does not include app-usage diagnostics. The official distribution is reproducible with `dotnet publish ChessKit.csproj /p:PublishProfile=Official-win-x64`; it includes the optional diagnostics capability and presents a separate first-run choice before any event is sent.
 
 Building produces the client only — live detection and the primary engine require the hosted services; a local UCI engine in `engines/` enables offline analysis.
 
@@ -135,7 +137,8 @@ Building produces the client only — live detection and the primary engine requ
 
 ## Privacy
 
-- **Telemetry is opt-in and off by default.** Nothing is uploaded unless you set `CHESSKIT_TELEMETRY=1`; when enabled it sends the detected position, engine analysis, a hashed hardware ID, and CPU/GPU usage. — `ScreenshotTelemetryClient`
+- **Optional app-usage diagnostics.** Official downloads ask whether to share first-party usage diagnostics used to improve the app and inform product and marketing decisions; nothing from this system is sent before an affirmative choice, and it can be disabled at any time in Settings. Events can include session timing, stable feature/toggle names and their individual enabled/disabled states, board-detection and visible-analysis outcomes, Free-limit pressure, app version/edition, a pseudonymous hashed hardware ID, and lightweight CPU/GPU measurements. They do **not** include screenshots, raw board positions/FEN, license keys, account details, machine names, filenames, paths, or the complete local configuration. Standard source builds compile this capability out unless `EnableAppUsageTelemetry=true` is explicitly selected.
+- **Separate board-image research telemetry.** `ScreenshotTelemetryClient` remains off unless you explicitly set `CHESSKIT_TELEMETRY=1`. When enabled, that separate research system may upload a board-crop image, detected position/FEN, engine analysis, the hashed hardware ID, and CPU/GPU usage.
 - **Hardware ID.** Licensing hashes standard machine identifiers (`HardwareIdentity`); raw serial numbers are never transmitted or stored.
 - **Logging is off by default** in release builds (opt-in via `CHESSKIT_LOG=1`).
 

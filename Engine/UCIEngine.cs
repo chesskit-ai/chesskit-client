@@ -316,6 +316,7 @@ namespace ChessKit
                         string summary = $"Engine restart paused for {waitSeconds}s after repeated crashes.";
                         RememberFailureSummary(summary);
                         LogDiag("ENGINE", summary);
+                        AppUsageTelemetryClient.QueueError("engine", "engine_start_failed");
                         return false;
                     }
                 }
@@ -380,6 +381,7 @@ namespace ChessKit
                 {
                     RememberFailureSummary("The server engine is currently unavailable. Please try again shortly.");
                     LogDiag("REMOTE_ENGINE", "remote-only engine unavailable; no local fallback");
+                    AppUsageTelemetryClient.QueueError("engine", "engine_start_failed");
                     return false;
                 }
 
@@ -390,6 +392,7 @@ namespace ChessKit
                     LogDiag("ENGINE", $"LC0 startup blocked: no weights file found near {_enginePath}");
                     RememberFailureSummary("LC0 requires a network weights file (*.pb.gz or *.pb) in the engines folder.");
                     DebugRuntime.WriteLine("[UCIEngine] LC0 requires a network weights file (*.pb.gz or *.pb) in the engines folder.");
+                    AppUsageTelemetryClient.QueueError("engine", "engine_start_failed");
                     return false;
                 }
 
@@ -490,6 +493,7 @@ namespace ChessKit
                         ?? $"UCI handshake failed for {Path.GetFileName(_enginePath)}.";
                     RememberFailureSummary(failureSummary);
                     DebugRuntime.WriteLine($"[UCIEngine] {failureSummary}");
+                    AppUsageTelemetryClient.QueueError("engine", "engine_start_failed");
                     return false;
                 }
 
@@ -644,6 +648,7 @@ namespace ChessKit
                 {
                     RememberFailureSummary($"Ready check failed for {Path.GetFileName(_enginePath)}.");
                     DebugRuntime.WriteLine($"[UCIEngine] Ready check failed for {Path.GetFileName(_enginePath)}");
+                    AppUsageTelemetryClient.QueueError("engine", "engine_start_failed");
                     return false;
                 }
 
@@ -669,6 +674,7 @@ namespace ChessKit
             {
                 RememberFailureSummary($"Failed to start {Path.GetFileName(_enginePath)}: {ex.Message}");
                 DebugRuntime.WriteLine($"[UCIEngine] Failed to start {Path.GetFileName(_enginePath)}: {ex.Message}");
+                AppUsageTelemetryClient.QueueError("engine", "engine_start_failed");
                 return false;
             }
         }
